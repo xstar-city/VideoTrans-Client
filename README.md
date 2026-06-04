@@ -205,7 +205,7 @@ python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
 | `--no-separate` | 跳过人声分离 | 否（默认启用） |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
-| `--translation-mode` | 翻译模式：`independent` / `tts_aware` | `tts_aware` |
+| `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
 | `--tts-aware-max-retries` | TTS 时长调整重试次数 | 3 |
@@ -213,6 +213,33 @@ python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
 | `--max-audio-speedup-pct` | TTS 音频最大加速比例 | 0.2 |
 | `--max-video-slowdown-pct` | 视频片段最大减速比例 | 0.1 |
 | `--max-video-speedup-pct` | 视频片段最大加速比例 | 0.2 |
+
+#### 翻译模式与时长匹配
+
+不同语言的语速和表达习惯不同，翻译后的语音时长往往与原文不一致。例如中文一句简短的话，翻译成英语可能需要更多词汇、更长时长。如果不做处理，翻译后的语音和画面就会错位。
+
+系统通过三层策略逐级消除时长差异：
+
+| 层级 | 手段 | 效果 |
+|------|------|------|
+| 第 1 层 | 调整翻译措辞 | 让 TTS 合成的文本本身就接近目标时长，**最自然** |
+| 第 2 层 | 音频变速 | 拉伸/压缩 TTS 音频时长，语速会略有变化 |
+| 第 3 层 | 视频变速 | 调整对应视频片段的播放速度来匹配音频，画面会略快/略慢 |
+
+第 1 层质量最高（从源头解决），第 2、3 层是兜底（有损但可控）。三层依次执行，前一层消化不了的差异交给下一层。
+
+`--translation-mode` 控制是否启用第 1 层：
+
+- **`independent`**（独立翻译）：只做文本翻译，不尝试调整措辞控制时长。翻译速度快，但时长差异完全依赖第 2、3 层（音频/视频变速）来消化，语速或画面速度变化可能较大。
+
+- **`tts_aware`**（TTS 时长感知翻译，默认）：系统先合成一版试听音频，测量实际时长，如果与原文差距过大，就让翻译模型调整措辞重新翻译（如把长句缩短、短句补充），反复迭代直到时长接近。大部分时长差异在第 1 层就被消化，剩余少量差异再由第 2、3 层兜底。
+
+四个时长匹配参数控制第 2、3 层的变速幅度上限：
+
+- `--max-audio-slowdown-pct` / `--max-audio-speedup-pct`：第 2 层音频变速上限。例如 `0.1` 表示最多减速 10%，`0.2` 表示最多加速 20%，超出则保持原速，避免声音变调明显。
+- `--max-video-slowdown-pct` / `--max-video-speedup-pct`：第 3 层视频变速上限。幅度过大会导致画面不自然，所以有上限约束。
+
+> 💡 一般情况下默认值即可。如果目标语言普遍比源语言慢很多（如中文→西班牙语），可适当放宽 `--max-audio-speedup-pct` 和 `--max-video-speedup-pct`。
 
 ### 音频翻译 `audio_translate.py`
 
