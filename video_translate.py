@@ -219,7 +219,7 @@ def main():
     p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
     p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
-    p.add_argument('--server', default='http://localhost:8001', help='服务端地址 (默认: http://localhost:8000)')
+    p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
     args = p.parse_args()
 
     # 解析输入路径
