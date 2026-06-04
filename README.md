@@ -163,7 +163,7 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 | `it` | Italian | | `th` | Thai |
 | `vi` | Vietnamese | | `id` | Indonesian |
 
-> 完整列表见 [tts_languages.py](https://cnb.cool/xstar.city/VideoTrans-Common/-/blob/main/src/Common/tts_languages.py)
+> 完整列表见 [tts_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/tts_languages.py)
 
 ---
 
