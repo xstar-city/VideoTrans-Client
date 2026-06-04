@@ -1,0 +1,2 @@
+示例项目/**/*.mp3 filter=lfs diff=lfs merge=lfs -text
+示例项目/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
