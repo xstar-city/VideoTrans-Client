@@ -149,7 +149,7 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 | `dongbei` | 东北话 | | `wu` | 吴语 |
 | `henan` | 河南话 | | `shaanxi` | 陕西话 |
 
-> 完整列表见 [asr_languages.py](https://cnb.cool/xstar.city/VideoTrans-Common/-/blob/main/src/Common/asr_languages.py)
+> 完整列表见 [asr_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/asr_languages.py)
 
 **输出语种（目标语言）**：支持 600+ 种语言
 
@@ -266,7 +266,7 @@ cd VideoTrans-Client
 cd Common && pip install -e . && cd ..
 ```
 
-详见 [Common/README.md](https://cnb.cool/xstar.city/VideoTrans-Common/-/blob/main/README.md)
+详见 [Common/README.md](https://github.com/xstar-city/VideoTrans-Common/blob/main/README.md)
 
 ---
 
