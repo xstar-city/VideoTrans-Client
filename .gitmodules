@@ -1,0 +1,3 @@
+[submodule "Common"]
+	path = Common
+	url = https://cnb.cool/xstar.city/VideoTrans-Common.git
