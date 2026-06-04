@@ -135,6 +135,8 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 
 > 💡 可运行 `Tools/copy_matching_srt_to_video_folders.py` 批量复制 SRT 到对应视频目录。
 
+> 💡 VideoTrans 会综合 ASR 和 SRT 两种来源进行交叉校准，比单一来源更准确。详见 [字幕ASR综合校准说明.md](字幕ASR综合校准说明.md)。
+
 ### 3. 支持的语种
 
 **输入语种（源语言）**：中文、英语及多种中国方言
