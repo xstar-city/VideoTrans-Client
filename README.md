@@ -177,7 +177,7 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 
 #### 基本模式 `video_translate_basic.py`
 
-适合大多数场景，预置最优参数，命令更简洁：
+适合单人讲座、教学视频、播客等单人主讲场景，预置精简参数，命令更简洁：
 
 ```bash
 python video_translate_basic.py "1.mp4" -t en --server http://<ServerIP>:8000
@@ -196,13 +196,6 @@ python video_translate_basic.py "1.mp4" -t en --server http://<ServerIP>:8000
 # 默认高级参数
 python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
 
-# 自定义参数
-python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000 \
-  --no-separate \
-  --denoise normal \
-  --asr-mode basic \
-  --translation-mode independent \
-  --translation-models "deepseek-v4-pro"
 ```
 
 **常用高级参数：**
