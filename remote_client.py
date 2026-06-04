@@ -1,0 +1,401 @@
+"""
+通用远程脚本执行 - 客户端
+
+轻量 HTTP 客户端，不依赖任何业务逻辑，只做：
+  1. 上传文件
+  2. 远程执行脚本（脚本名 + 参数）
+  3. 轮询等待完成
+  4. 下载结果文件
+
+用法:
+    from remote_client import RemoteScriptClient
+
+    client = RemoteScriptClient("http://your-server:8000")
+    task_id = client.upload("input.mp3")
+    client.run("audio_translate.py", ["input.mp3", "-t", "zh"], task_id=task_id)
+    client.wait(task_id)
+    client.download(task_id, "output/final.wav", "final.wav")
+"""
+
+import time
+from pathlib import Path
+from typing import Optional
+
+import requests
+
+
+class RemoteScriptClient:
+    """通用远程脚本执行客户端"""
+
+    def __init__(self, base_url: str, api_key: Optional[str] = None,
+                 timeout: tuple[float, float] | float = (10, 300)):
+        """
+        参数:
+            base_url: 服务端地址，如 "http://<ServerIP>:8000"
+            api_key: 可选，API 密钥（预留，服务端暂未实现鉴权）
+            timeout: 单次 HTTP 请求超时（秒），支持两种格式：
+                     - 元组 (connect_timeout, read_timeout)，如 (10, 300)
+                       connect_timeout: 建立连接的超时（秒），默认 10s
+                       read_timeout: 等待响应的超时（秒），默认 300s
+                     - 单个数字: 同时用于连接和读取（兼容旧用法）
+        """
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def _headers(self) -> dict:
+        """构建请求头"""
+        h = {}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    # ─── 健康检查 ──────────────────────────────────────────
+
+    def check_server(self, timeout: float = 10.0) -> None:
+        """验证服务端可达性，不可达时抛出 ConnectionError。
+
+        在执行任何业务操作前调用，避免后续请求卡死。
+        使用独立的短超时，不受 self.timeout 影响。
+
+        异常:
+            ConnectionError: 服务端不可达或响应异常
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/health",
+                headers=self._headers(),
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                raise ConnectionError(
+                    f"服务端响应异常 (HTTP {resp.status_code}): {self.base_url}"
+                )
+        except requests.exceptions.ConnectionError as e:
+            raise ConnectionError(
+                f"无法连接服务端: {self.base_url}\n"
+                f"  请确认服务端已启动且端口正确。\n"
+                f"  原始错误: {e}"
+            )
+        except requests.exceptions.Timeout:
+            raise ConnectionError(
+                f"连接服务端超时 ({timeout}s): {self.base_url}\n"
+                f"  可能原因：端口被占用（如 Docker Desktop 端口残留），服务端进程僵死。"
+            )
+
+    # ─── 上传文件 ──────────────────────────────────────────
+
+    def upload(self, file_path: str | Path,
+               task_id: Optional[str] = None,
+               dest_path: Optional[str] = None) -> dict:
+        """
+        上传文件到服务端
+
+        参数:
+            file_path: 本地文件路径
+            task_id: 可选，关联已有的任务 ID
+            dest_path: 可选，服务端目标子路径（如 "《逐玉》_a3f1/1.mp3"），
+                       文件将存为 workspace/{task_id}/{dest_path}，
+                       不传则直接放在任务目录根下
+
+        返回:
+            {"task_id": "...", "file_name": "...", "file_path": "...", "size": 123}
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+
+        params = {}
+        if task_id:
+            params["task_id"] = task_id
+        if dest_path:
+            params["dest_path"] = dest_path
+
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                f"{self.base_url}/upload",
+                files={"file": (file_path.name, f)},
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    def upload_bytes(self, file_name: str, data: bytes,
+                     task_id: Optional[str] = None) -> dict:
+        """
+        上传二进制数据到服务端
+
+        参数:
+            file_name: 文件名
+            data: 文件内容
+            task_id: 可选，关联已有的任务 ID
+
+        返回:
+            同 upload()
+        """
+        params = {}
+        if task_id:
+            params["task_id"] = task_id
+
+        resp = requests.post(
+            f"{self.base_url}/upload",
+            files={"file": (file_name, data)},
+            params=params,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 执行脚本 ──────────────────────────────────────────
+
+    def run(self, script: str, args: list[str] = [],
+            task_id: Optional[str] = None,
+            env: Optional[dict[str, str]] = None,
+            client_mode: bool = False,
+            video_summary: Optional[str] = None) -> dict:
+        """
+        远程执行脚本
+
+        参数通过 JSON body 传递，避免 URL 长度限制（支持大批量输入）。
+
+        参数:
+            script: 脚本文件名，如 "audio_translate.py"
+            args: 命令行参数列表
+            task_id: 可选，关联已有的上传任务
+            env: 可选，额外环境变量
+            client_mode: 可选，是否为客户端模式（服务端据此调整行为）
+            video_summary: 可选，视频名称摘要（用于 Web UI 展示）
+
+        返回:
+            {"task_id": "...", "script": "...", "status": "running"}
+        """
+        body = {
+            "script": script,
+            "args": args,
+        }
+        if task_id:
+            body["task_id"] = task_id
+        if env:
+            body["env"] = env
+        if client_mode:
+            body["client_mode"] = True
+        if video_summary:
+            body["video_summary"] = video_summary
+
+        resp = requests.post(
+            f"{self.base_url}/run",
+            json=body,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 查询状态 ──────────────────────────────────────────
+
+    def status(self, task_id: str, since_line: int = 0) -> dict:
+        """
+        查询任务状态
+
+        参数:
+            task_id: 任务 ID
+            since_line: 增量日志起始行号，0 表示获取全部
+
+        返回:
+            {"task_id": "...", "status": "running|done|failed|cancelled",
+             "return_code": 0, "stdout": "...", "stderr": "...",
+             "total_lines": 123}
+        """
+        params = {}
+        if since_line > 0:
+            params["since_line"] = since_line
+
+        resp = requests.get(
+            f"{self.base_url}/status/{task_id}",
+            params=params,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 等待完成 ──────────────────────────────────────────
+
+    def wait(self, task_id: str, poll_interval: float = 2.0,
+             timeout: float = 900.0,
+             on_progress: Optional[callable] = None) -> dict:
+        """
+        轮询等待任务完成
+
+        超时策略：活跃度超时（非挂钟超时）。只要服务端持续有新输出，
+        就不会超时；仅当连续 timeout 秒无新输出时才判定超时。
+        这确保长时间任务（如 100+ 段 TTS 翻译）不会被挂钟上限误杀。
+
+        参数:
+            task_id: 任务 ID
+            poll_interval: 轮询间隔（秒）
+            timeout: 最大无输出空闲时间（秒），默认 900s（15 分钟）
+            on_progress: 可选回调，每次轮询时调用，参数为 status dict
+
+        返回:
+            最终的 status dict
+
+        异常:
+            TimeoutError: 活跃度超时（长时间无新输出）
+            RuntimeError: 任务失败或被取消
+        """
+        since_line = 0
+        last_raw_total_lines = 0
+        last_activity_time = time.time()
+
+        while True:
+            info = self.status(task_id, since_line=since_line)
+
+            if on_progress:
+                on_progress(info)
+
+            # since_line 基于 total_lines（过滤后的可见行数），用于增量 stdout 对齐
+            total_lines = info.get("total_lines", 0)
+            if total_lines > since_line:
+                since_line = total_lines
+
+            # 活跃度检测：基于 raw_total_lines（原始未过滤行数）
+            # 因为 client_mode 下服务端会过滤 stdout，可见行数增长缓慢，
+            # 但子进程仍在持续输出日志，raw_total_lines 能反映真实活跃状态
+            raw_total_lines = info.get("raw_total_lines", total_lines)
+            if raw_total_lines > last_raw_total_lines:
+                last_activity_time = time.time()
+                last_raw_total_lines = raw_total_lines
+
+            if info["status"] in ("done", "failed", "cancelled"):
+                if info["status"] != "done":
+                    raise RuntimeError(
+                        f"任务 {task_id} 状态: {info['status']}\n"
+                        f"stderr: {info.get('stderr', '')}"
+                    )
+                return info
+
+            # 活跃度超时：长时间无新输出
+            idle_seconds = time.time() - last_activity_time
+            if idle_seconds > timeout:
+                raise TimeoutError(
+                    f"任务 {task_id} 已 {timeout:.0f}s 无新输出 "
+                    f"(状态: {info['status']}, 原始输出行数: {raw_total_lines})"
+                )
+
+            time.sleep(poll_interval)
+
+    # ─── 下载结果 ──────────────────────────────────────────
+
+    def download(self, task_id: str, remote_path: str,
+                 local_path: Optional[str | Path] = None) -> Path:
+        """
+        下载任务结果文件
+
+        参数:
+            task_id: 任务 ID
+            remote_path: 服务端文件路径（相对于任务工作目录）
+            local_path: 本地保存路径，默认为当前目录下的文件名
+
+        返回:
+            本地文件路径
+        """
+        resp = requests.get(
+            f"{self.base_url}/download/{task_id}/{remote_path}",
+            headers=self._headers(),
+            timeout=self.timeout,
+            stream=True,
+        )
+        resp.raise_for_status()
+
+        if local_path is None:
+            # 从 URL 或 Content-Disposition 推断文件名
+            local_path = Path(remote_path).name
+
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        return local_path
+
+    # ─── 列出文件 ──────────────────────────────────────────
+
+    def list_files(self, task_id: str, sub_dir: str = "",
+                   since: float = 0) -> dict:
+        """
+        列出任务工作目录中的文件
+
+        参数:
+            task_id: 任务 ID
+            sub_dir: 子目录路径
+            since: 增量过滤，只返回 mtime > since 的文件，0 表示列出全部
+
+        返回:
+            {"task_id": "...", "path": "...", "items": [...]}
+        """
+        params = {}
+        if sub_dir:
+            params["sub_dir"] = sub_dir
+        if since > 0:
+            params["since"] = since
+
+        resp = requests.get(
+            f"{self.base_url}/files/{task_id}",
+            params=params,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 取消任务 ──────────────────────────────────────────
+
+    def cancel(self, task_id: str) -> dict:
+        """取消正在运行的任务"""
+        resp = requests.post(
+            f"{self.base_url}/cancel/{task_id}",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 便捷方法：上传 → 执行 → 等待 ──────────────────────
+
+    def run_with_files(self, script: str, args: list[str],
+                       files: list[str | Path],
+                       poll_interval: float = 2.0,
+                       timeout: float = 3600.0,
+                       on_progress: Optional[callable] = None) -> dict:
+        """
+        一站式：上传文件 → 执行脚本 → 等待完成
+
+        参数:
+            script: 脚本名
+            args: 命令行参数
+            files: 要上传的本地文件路径列表
+            poll_interval: 轮询间隔
+            timeout: 最大等待时间
+            on_progress: 进度回调
+
+        返回:
+            最终的 status dict
+        """
+        # 上传所有文件，共享同一个 task_id
+        task_id = None
+        for f in files:
+            result = self.upload(f, task_id=task_id)
+            task_id = result["task_id"]
+
+        # 执行脚本
+        self.run(script, args, task_id=task_id)
+
+        # 等待完成
+        return self.wait(task_id, poll_interval=poll_interval,
+                         timeout=timeout, on_progress=on_progress)

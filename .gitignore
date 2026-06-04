@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Distribution
+build/
+dist/
+*.egg-info/
+
+# 媒体文件（示例项目中的音视频数据不提交）
+*.mp3
+*.mp4
+*.wav
+*.flac
+*.ogg
+*.aac
+*.m4a
+
+# 运行时生成文件
+.vt_task_id
+*.done

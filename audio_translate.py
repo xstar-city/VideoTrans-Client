@@ -1,0 +1,489 @@
+#!/usr/bin/env python3
+"""音频翻译客户端代理
+
+将音频文件上传到服务端远程执行翻译流水线，实时查看步骤进度，增量下载翻译结果到本地。
+
+用法：
+    python audio_translate.py input.mp3 -t en --server http://<ServerIP>:8000
+
+断点续跑（task_id 机制）：
+    客户端与服务端为一对一模式：一个 task_id 对应一个固定的工作目录。
+    上传音频后，会在第一个音频文件所在目录生成 .vt_task_id 文件记录 task_id。
+    再次运行时（同一音频目录），脚本自动读取该文件，复用老 task_id 重新执行脚本——
+    效果等价于登录服务器在同一目录下重新跑命令：服务端工作目录不变，
+    audio_translate.py 内部的缓存检查机制会自动跳过已完成的步骤（ASR、翻译、TTS 等），
+    只执行之前失败或未完成的步骤，实现断点续跑。
+    如需强制从零开始，使用 --new-task 参数或手动删除 .vt_task_id 文件。
+
+依赖：
+    - requests（pip install requests）
+    - remote_client.py（通用 HTTP 客户端）
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import sys
+import time
+from pathlib import Path
+
+
+from Common.config import (
+    SEGMENTS_DIRNAME,
+    ASR_DIRNAME,
+    build_segments_dir,
+)
+from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
+from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
+
+
+from remote_client import RemoteScriptClient
+
+
+# ─── task_id 持久化 ───────────────────────────────────────
+
+TASK_ID_FILENAME = ".vt_task_id"
+
+
+def _save_task_id(audio_path: Path, task_id: str):
+    """将 task_id 保存到音频文件旁边的 .vt_task_id 文件"""
+    marker = audio_path.parent / TASK_ID_FILENAME
+    marker.write_text(task_id, encoding="utf-8")
+
+
+def _save_task_id_all(input_paths: list[Path], task_id: str):
+    """将同一个 task_id 保存到所有输入文件所在目录的 .vt_task_id 文件"""
+    for p in input_paths:
+        _save_task_id(p, task_id)
+
+
+def _load_task_id(audio_path: Path) -> str | None:
+    """从音频文件旁读取之前保存的 task_id"""
+    marker = audio_path.parent / TASK_ID_FILENAME
+    if marker.exists():
+        task_id = marker.read_text(encoding="utf-8").strip()
+        if task_id:
+            return task_id
+    return None
+
+
+def _validate_task_ids(input_paths: list[Path]) -> str | None:
+    """检查所有输入文件目录下的 .vt_task_id 是否一致。
+
+    返回:
+        一致的 task_id（所有目录都有且相同时）
+        None（所有目录都没有 .vt_task_id）
+
+    异常退出:
+        如果某些目录有、某些没有，或 task_id 不一致，报错退出。
+    """
+    dir_task_ids: dict[str, str | None] = {}  # {目录绝对路径: task_id 或 None}
+    for p in input_paths:
+        dir_key = str(p.resolve().parent)
+        if dir_key not in dir_task_ids:
+            dir_task_ids[dir_key] = _load_task_id(p)
+
+    # 去重后的 task_id 集合（排除 None）
+    unique_ids = {v for v in dir_task_ids.values() if v is not None}
+
+    if not unique_ids:
+        # 所有目录都没有 task_id
+        return None
+
+    if len(unique_ids) > 1:
+        # 多个不同的 task_id
+        id_dirs = {}
+        for dir_key, tid in dir_task_ids.items():
+            if tid:
+                id_dirs.setdefault(tid, []).append(dir_key)
+        details = "\n".join(
+            f"  task_id={tid}: {', '.join(dirs)}"
+            for tid, dirs in id_dirs.items()
+        )
+        print("[错误] 不同视频目录下的 .vt_task_id 不一致，不能混合执行！")
+        print(f"  这些视频曾在不同任务中运行过，请先删除不需要的 .vt_task_id 文件：")
+        print(details)
+        sys.exit(1)
+
+    # 只有一个 task_id，检查是否所有目录都有
+    the_id = unique_ids.pop()
+    missing_dirs = [k for k, v in dir_task_ids.items() if v is None]
+    if missing_dirs:
+        print("[错误] 部分视频目录缺少 .vt_task_id，不能混合执行！")
+        print(f"  task_id={the_id} 存在于部分目录，但以下目录没有：")
+        for d in missing_dirs:
+            print(f"    {d}")
+        print("  这些视频从未在此任务中运行过，混合执行会导致文件混乱。")
+        print("  如需重新跑，请删除所有相关目录下的 .vt_task_id 文件后重试。")
+        sys.exit(1)
+
+    return the_id
+
+
+
+
+
+
+# ─── 辅助函数 ─────────────────────────────────────────────
+
+def _compute_dest_dir(file_path: Path) -> str:
+    """计算文件在服务端工作目录中的子目录名（父目录名 + hash 防冲突）。
+
+    例如：E:\\...\\《逐玉》\\1.mp3 → "《逐玉》_a3f1"
+    """
+    parent = file_path.resolve().parent
+    hash_suffix = hashlib.md5(str(parent).encode()).hexdigest()[:4]
+    return f"{parent.name}_{hash_suffix}"
+
+
+def _compute_video_summary(file_paths: list[Path]) -> str:
+    """计算视频名称摘要，用于 dashboard 展示。
+
+    单文件：最后3层父路径，如 Demo\\多语种翻译\\《逐玉》
+    多文件(>2)：前2个 + ...等N个
+    """
+    def _single_summary(p: Path) -> str:
+        parts = p.resolve().parent.parts
+        return "\\".join(parts[-3:]) if len(parts) >= 3 else "\\".join(parts)
+
+    summaries = [_single_summary(p) for p in file_paths]
+    if len(summaries) == 1:
+        return summaries[0]
+    if len(summaries) <= 2:
+        return ", ".join(summaries)
+    return f"{summaries[0]}, {summaries[1]}, ...等{len(summaries)}个"
+
+
+def _find_matching_srt(audio_path: Path) -> Path | None:
+    """查找与音频同名的 SRT 文件。"""
+    for suffix in ('.srt', '.SRT'):
+        srt_path = audio_path.with_suffix(suffix)
+        if srt_path.exists():
+            return srt_path
+    return None
+
+
+def _build_remote_args(args) -> list[str]:
+    """将客户端参数转换为服务端脚本的命令行参数。"""
+    remote_args = []
+
+    # 音频文件名（含子目录路径，服务端 cwd 为 workspace/{task_id}/）
+    for input_path in args.inputs:
+        p = Path(input_path)
+        dest_dir = _compute_dest_dir(p)
+        remote_args.append(f"{dest_dir}/{p.name}")
+
+    # 目标语言
+    if args.targets:
+        remote_args.extend(['--target'] + args.targets)
+
+    # 源语言
+    if args.source:
+        remote_args.extend(['--source', args.source])
+
+    # 人声分离
+    if args.no_separate:
+        remote_args.append('--no-separate')
+
+    # 额外翻译指南
+    if args.extra_translation_guideline:
+        # 上传指南文件，传文件名
+        guideline_path = Path(args.extra_translation_guideline)
+        remote_args.extend(['--extra_translation_guideline', guideline_path.name])
+
+    # FlexSED 事件检测
+    if args.detect_flexsed_event:
+        remote_args.append('--detect-flexsed-event')
+
+    # 降噪
+    remote_args.extend(['--denoise', args.denoise])
+
+    # ASR 模式
+    remote_args.extend(['--asr-mode', args.asr_mode])
+
+    # 翻译模型
+    if args.translation_models:
+        remote_args.extend(['--translation-models', args.translation_models])
+
+    # 翻译模式
+    remote_args.extend(['--translation-mode', args.translation_mode])
+
+    # TTS 感知重试次数
+    remote_args.extend(['--tts-aware-max-retries', str(args.tts_aware_max_retries)])
+
+    # 音频时长伸缩限制
+    remote_args.extend(['--max-audio-slowdown-pct', str(args.max_audio_slowdown_pct)])
+    remote_args.extend(['--max-audio-speedup-pct', str(args.max_audio_speedup_pct)])
+
+    # 视频时长伸缩限制
+    remote_args.extend(['--max-video-slowdown-pct', str(args.max_video_slowdown_pct)])
+    remote_args.extend(['--max-video-speedup-pct', str(args.max_video_speedup_pct)])
+
+    return remote_args
+
+
+def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
+                sub_dir: str = "", since: float = 0) -> float:
+    """从服务端增量下载文件到本地目录，返回最新的 mtime。"""
+    result = client.list_files(task_id, sub_dir=sub_dir, since=since)
+    latest_mtime = since
+
+    for item in result.get("items", []):
+        name = item["name"]
+        mtime = item.get("mtime", 0)
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+
+        if item["type"] == "dir":
+            # 递归同步子目录
+            local_sub = local_dir / name
+            local_sub.mkdir(parents=True, exist_ok=True)
+            sub_latest = _sync_files(
+                client, task_id, local_sub,
+                sub_dir=f"{sub_dir}/{name}" if sub_dir else name,
+                since=since,
+            )
+            if sub_latest > latest_mtime:
+                latest_mtime = sub_latest
+        else:
+            # 下载文件（size 一致则跳过，避免重复下载）
+            local_file = local_dir / name
+            remote_path = f"{sub_dir}/{name}" if sub_dir else name
+            remote_size = item.get("size", -1)
+            if local_file.exists() and remote_size >= 0:
+                try:
+                    local_size = local_file.stat().st_size
+                    if local_size == remote_size:
+                        continue
+                except OSError:
+                    pass
+            try:
+                client.download(task_id, remote_path, local_path=local_file)
+            except Exception as e:
+                print(f"  下载失败 {remote_path}: {e}")
+
+    return latest_mtime
+
+
+# ─── 主流程 ────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(description='音频翻译客户端：上传音频到服务端远程执行翻译，增量下载结果。')
+    p.add_argument('inputs', nargs='+', help='本地音频文件路径列表 (mp3)。')
+    p.add_argument('--target', '-t', dest='targets', nargs='+', default=['en'], choices=ALL_TTS_LANGUAGE_CODES, help='要翻译输出的目标语言代码，默认：en（English）')
+    p.add_argument('--source', '-s', default='zh', choices=ALL_ASR_LANGUAGE_CODES, help='输入音频的源语言代码（例如 en, zh），默认：zh（普通话，也支持中国方言）')
+    p.add_argument('--no-separate', action='store_true', help='跳过人声分离，保留原始音频（默认会运行人声分离以去除背景音）。')
+    p.add_argument('--detect-flexsed-event', action='store_true', help='在分离过程中启用 FlexSED 事件检测和下游 LLM 过滤（默认禁用）。')
+    p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
+    p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
+    p.add_argument('--diarization-lowpass-freq', type=int, default=8000, help='二次精细说话人切分的低通滤波截止频率 (Hz)。杂音多的录音可调低到 3000-5000，正常录音 8000。越高保留越多高频语音细节，但也更易引入伪影噪音。默认：8000')
+    p.add_argument('--diarization-highpass-freq', type=int, default=80, help='二次精细说话人切分的高通滤波截止频率 (Hz)。默认：80')
+    p.add_argument('--translation-models', default='', help='用于翻译的逗号分隔模型列表。空值使用服务端默认值。')
+    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
+    p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=3, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
+    # 视频的伸缩，是音频最后没能伸缩到1，剩下的部分。比如tts合成音频长1.5s，原音频长1s，压缩音频到1.3s后，剩下的0.3s，就是视频的伸缩，画面会变快。
+    p.add_argument('--max-audio-slowdown-pct', type=float, default=0.1, help='允许的最大 TTS 音频加速比例（相对原始时长）')
+    p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
+    p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
+    p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
+    p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
+    p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
+    args = p.parse_args()
+
+    client = RemoteScriptClient(args.server)
+
+    # ── 预检：验证服务端可达 ──────────────────────────────────
+    try:
+        client.check_server()
+    except ConnectionError as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
+
+    first_input = Path(args.inputs[0])
+
+    # ── 0. 检查本地是否有保存的 task_id ──────────────────────
+    # 有则直接复用老 task_id 重新执行脚本，服务端工作目录不变，缓存文件可用
+    # 无则上传文件 + 创建新任务
+    # 多视频时，所有视频目录的 .vt_task_id 必须一致，否则报错
+    input_paths = [Path(p) for p in args.inputs]
+    task_id = None
+    if not args.new_task:
+        task_id = _validate_task_ids(input_paths)
+        if task_id:
+            print(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
+
+    # ── 1. 上传音频文件 ──────────────────────────────────────
+    # 老 task_id 时先查询服务端已有文件，size 一致则跳过上传
+    existing_remote_files: dict[str, int] = {}  # {相对路径: size}
+    if task_id:
+        # 查询根目录文件（翻译指南等放根目录）
+        try:
+            result = client.list_files(task_id, sub_dir="", since=0)
+            for item in result.get("items", []):
+                if item["type"] == "file":
+                    size = item.get("size", -1)
+                    if size >= 0:
+                        existing_remote_files[item["name"]] = size
+        except Exception:
+            pass
+        # 查询各子目录中的文件
+        for input_path in args.inputs:
+            dest_dir = _compute_dest_dir(Path(input_path))
+            try:
+                result = client.list_files(task_id, sub_dir=dest_dir, since=0)
+                for item in result.get("items", []):
+                    if item["type"] == "file":
+                        key = f"{dest_dir}/{item['name']}"
+                        size = item.get("size", -1)
+                        if size >= 0:
+                            existing_remote_files[key] = size
+            except Exception:
+                pass  # 子目录不存在时不阻断，走全量上传
+
+    for input_path in args.inputs:
+        path = Path(input_path)
+        if not path.exists():
+            print(f"文件不存在: {path}")
+            sys.exit(1)
+
+        dest_dir = _compute_dest_dir(path)
+        dest_path = f"{dest_dir}/{path.name}"
+
+        local_size = path.stat().st_size
+        remote_size = existing_remote_files.get(dest_path)
+        if remote_size is not None and remote_size == local_size:
+            print(f"服务端已存在相同文件，跳过上传: {dest_path}")
+            continue
+
+        file_size_mb = local_size / (1024 * 1024)
+        print(f"上传: {dest_path} ({file_size_mb:.1f} MB)...")
+        result = client.upload(path, task_id=task_id, dest_path=dest_path)
+        task_id = result["task_id"]
+        print(f"  已上传, task_id={task_id}")
+
+    # 持久化 task_id（保存到所有输入文件所在目录）
+    _save_task_id_all(input_paths, task_id)
+
+    # ── 2. 自动发现并上传同名 SRT 和翻译指南 ──────────────
+    for input_path in args.inputs:
+        srt_path = _find_matching_srt(Path(input_path))
+        if srt_path:
+            dest_dir = _compute_dest_dir(Path(input_path))
+            srt_dest = f"{dest_dir}/{srt_path.name}"
+            local_size = srt_path.stat().st_size
+            remote_size = existing_remote_files.get(srt_dest)
+            if remote_size is not None and remote_size == local_size:
+                print(f"服务端已存在相同文件，跳过上传: {srt_dest}")
+            else:
+                print(f"上传辅助文件: {srt_dest}...")
+                client.upload(srt_path, task_id=task_id, dest_path=srt_dest)
+
+    if args.extra_translation_guideline:
+        guideline_path = Path(args.extra_translation_guideline)
+        if guideline_path.exists():
+            local_size = guideline_path.stat().st_size
+            remote_size = existing_remote_files.get(guideline_path.name)
+            if remote_size is not None and remote_size == local_size:
+                print(f"服务端已存在相同文件，跳过上传: {guideline_path.name}")
+            else:
+                print(f"上传翻译指南: {guideline_path.name}...")
+                client.upload(guideline_path, task_id=task_id)
+
+    # ── 3. 远程执行 ─────────────────────────────────────────
+    remote_args = _build_remote_args(args)
+    video_summary = _compute_video_summary([Path(p) for p in args.inputs])
+    print(f"启动远程翻译 (client_mode)...")
+    try:
+        client.run('audio_translate.py', remote_args, task_id=task_id,
+                   client_mode=True, video_summary=video_summary)
+    except Exception as e:
+        # 服务端可能因为一对一约束拒绝（409），此时给出提示
+        if "409" in str(e) or "并发上限" in str(e):
+            print(f"\n[错误] 服务端已有任务运行中，请等待或通过 Web UI 取消。")
+            print(f"  task_id={task_id} 已保存，稍后可重跑此命令恢复。")
+            sys.exit(1)
+        raise
+
+    # ── 4. 轮询 + 增量下载 ──────────────────────────────
+    last_sync_time = 0.0   # 增量查询基准：服务端文件 mtime
+    last_sync_check = 0.0  # 同步频率控制：wall clock
+    last_line = 0
+
+    # 为每个输入文件计算本地目录和对应的子目录名
+    input_sync_info = []
+    for input_path in args.inputs:
+        p = Path(input_path)
+        input_sync_info.append((p.parent, _compute_dest_dir(p)))
+
+    def on_progress(status_info):
+        nonlocal last_sync_time, last_sync_check, last_line
+
+        # 打印增量日志
+        stdout = status_info.get("stdout", "")
+        if stdout:
+            print(stdout, end='', flush=True)
+        last_line = status_info.get("total_lines", last_line)
+
+        # 每 3 秒增量下载：按每个输入的子目录分别同步
+        now = time.time()
+        if now - last_sync_check >= 3.0:
+            try:
+                max_mtime = last_sync_time
+                for local_dir, dest_dir in input_sync_info:
+                    synced_mtime = _sync_files(
+                        client, task_id, local_dir,
+                        sub_dir=dest_dir, since=last_sync_time
+                    )
+                    if synced_mtime > max_mtime:
+                        max_mtime = synced_mtime
+                if max_mtime > last_sync_time:
+                    last_sync_time = max_mtime
+            except Exception:
+                pass
+            last_sync_check = now
+
+    try:
+        client.wait(task_id, poll_interval=2.0, on_progress=on_progress)
+    except KeyboardInterrupt:
+        # 捕获 Ctrl+C：通知服务端取消任务，然后退出
+        print(f"\n\n中断信号收到，正在取消服务端任务 {task_id}...")
+        try:
+            result = client.cancel(task_id)
+            status = result.get('status', 'unknown')
+            print(f"任务已取消: {status}")
+            # 容器重启在服务端进程内完成（按需重启当前正在使用的 GPU 容器）
+        except Exception as e:
+            print(f"取消任务失败: {e}")
+        print(f"task_id={task_id} 已保存，重跑可恢复。")
+        sys.exit(130)
+    except RuntimeError as e:
+        print(f"\n任务失败: {e}")
+        sys.exit(1)
+    except TimeoutError as e:
+        print(f"\n任务超时: {e}")
+        # 查询服务端任务当前状态，帮助用户判断是否仍在运行
+        try:
+            info = client.status(task_id)
+            srv_status = info.get("status", "unknown")
+            total_lines = info.get("total_lines", 0)
+            if srv_status == "running":
+                print(f"  服务端任务仍在运行 (已输出 {total_lines} 行)，可重新运行此命令恢复监听。")
+                print(f"  task_id={task_id} 已保存。")
+            else:
+                print(f"  服务端任务状态: {srv_status}")
+        except Exception:
+            print(f"  无法查询服务端状态，task_id={task_id} 已保存，可重新运行此命令恢复。")
+        sys.exit(1)
+
+    # ── 5. 最终全量同步 ─────────────────────────────────
+    print("\n同步最终结果...")
+    for local_dir, dest_dir in input_sync_info:
+        _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0)
+
+    print("完成!")
+
+
+if __name__ == '__main__':
+    main()

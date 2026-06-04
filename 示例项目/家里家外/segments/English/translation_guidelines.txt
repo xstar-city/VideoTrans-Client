@@ -1,0 +1,13 @@
+领域与风格：现实主义题材影视剧本，语体风格为口语化、方言色彩浓厚的市井对话。
+
+核心术语统一译法：
+长江中上游：Upper and middle reaches of the Yangtze River
+灾后重建：Post-disaster reconstruction
+工会/厂区：Factory
+医务室：Infirmary
+
+保留原文的专有术语：
+无（所有专有名词如人名、地名均需译为英文拼写或对应意译）。
+
+数字处理规则：
+严禁使用阿拉伯数字，全文必须将所有数字转换为英文单词（例如：一律写为one, two, three等）。
