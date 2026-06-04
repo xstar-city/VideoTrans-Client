@@ -70,6 +70,8 @@ python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server http://<
 
 ## 架构设计
 
+![架构图](resourses/服务端客户端.svg)
+
 VideoTrans 采用 **客户端-服务端** 分离架构：
 
 - **客户端**：纯命令行脚本，只负责发送请求和本地 ffmpeg 操作，零业务逻辑
@@ -211,7 +213,7 @@ python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000 \
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware` | `tts_aware` |
-| `--translation-models` | 翻译模型（逗号分隔） | 自动选择 |
+| `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
 | `--tts-aware-max-retries` | TTS 时长调整重试次数 | 3 |
 | `--max-audio-slowdown-pct` | TTS 音频最大减速比例 | 0.1 |
