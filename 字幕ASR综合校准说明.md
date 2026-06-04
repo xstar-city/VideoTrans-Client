@@ -12,7 +12,7 @@ VideoTrans 采用 **ASR + SRT 综合校准**策略——同时参考两种来源
 
 ![综合ASR校准SRT错误例子](resourses/综合ASR校准SRT错误例子.jpg)
 
-上图中，SRT 突然冒出一句 【元没车】，在竞品中如果选择SRT来源，视频会翻译成 yuan has no car，导致观众听起来很迷惑。
+上图中，SRT 突然冒出一句 【元没车】，在竞品中如果选择SRT来源翻译英文，视频会翻译被成 yuan has no car，导致观众听起来很迷惑。
 
 ---
 
