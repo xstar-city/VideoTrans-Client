@@ -50,6 +50,8 @@ python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server http://<
 逐玉/
 ├── 1.mp4                       ← 原始视频
 ├── 1.mp3                       ← 提取的音频
+├── 1_vocals_denoised.mp3       ← 分离出的人声（经降噪）
+├── 1_others_denoised.mp3       ← 分离出的背景音（经降噪）
 ├── 1_translated_en.mp4         ← 英文翻译视频
 └── segments/                   ← 所有中间文件
     ├── ASR/                    ← 语音识别结果
