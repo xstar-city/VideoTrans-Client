@@ -261,7 +261,7 @@ ffprobe -version
 ### 3. Common 模块
 
 ```bash
-git clone --recurse-submodules https://cnb.cool/xstar.city/VideoTrans-Client.git
+git clone --recurse-submodules https://github.com/xstar-city/VideoTrans-Client.git
 cd VideoTrans-Client
 cd Common && pip install -e . && cd ..
 ```
