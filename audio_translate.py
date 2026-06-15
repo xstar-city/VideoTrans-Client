@@ -182,8 +182,8 @@ def _build_remote_args(args) -> list[str]:
     if args.source:
         remote_args.extend(['--source', args.source])
 
-    # 人声分离
-    if args.no_separate:
+    # 人声分离：默认开启；只在用户显式关闭时透传 --no-separate
+    if not args.separate:
         remote_args.append('--no-separate')
 
     # 额外翻译指南
@@ -192,9 +192,9 @@ def _build_remote_args(args) -> list[str]:
         guideline_path = Path(args.extra_translation_guideline)
         remote_args.extend(['--extra_translation_guideline', guideline_path.name])
 
-    # FlexSED 事件检测
-    if args.detect_flexsed_event:
-        remote_args.append('--detect-flexsed-event')
+    # 非语言人声 + 唱歌检测：默认开启；只在用户显式关闭时透传 --no- 标志
+    if not args.detect_nonverbal_and_singing:
+        remote_args.append('--no-detect-nonverbal-and-singing')
 
     # 降噪
     remote_args.extend(['--denoise', args.denoise])
@@ -219,6 +219,10 @@ def _build_remote_args(args) -> list[str]:
     # 视频时长伸缩限制
     remote_args.extend(['--max-video-slowdown-pct', str(args.max_video_slowdown_pct)])
     remote_args.extend(['--max-video-speedup-pct', str(args.max_video_speedup_pct)])
+
+    # 视觉辅助说话人切分（默认关闭，仅在显式开启时透传）
+    if getattr(args, 'enable_visual_diarization', False):
+        remote_args.append('--enable-visual-diarization')
 
     return remote_args
 
@@ -273,8 +277,12 @@ def main():
     p.add_argument('inputs', nargs='+', help='本地音频文件路径列表 (mp3)。')
     p.add_argument('--target', '-t', dest='targets', nargs='+', default=['en'], choices=ALL_TTS_LANGUAGE_CODES, help='要翻译输出的目标语言代码，默认：en（English）')
     p.add_argument('--source', '-s', default='zh', choices=ALL_ASR_LANGUAGE_CODES, help='输入音频的源语言代码（例如 en, zh），默认：zh（普通话，也支持中国方言）')
-    p.add_argument('--no-separate', action='store_true', help='跳过人声分离，保留原始音频（默认会运行人声分离以去除背景音）。')
-    p.add_argument('--detect-flexsed-event', action='store_true', help='在分离过程中启用 FlexSED 事件检测和下游 LLM 过滤（默认禁用）。')
+    p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
+                   help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
+    p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=True,
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。'
+                        '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
+                        '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
     p.add_argument('--diarization-lowpass-freq', type=int, default=8000, help='二次精细说话人切分的低通滤波截止频率 (Hz)。杂音多的录音可调低到 3000-5000，正常录音 8000。越高保留越多高频语音细节，但也更易引入伪影噪音。默认：8000')
@@ -290,6 +298,10 @@ def main():
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
     p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
+    # 内部参数：仅供客户端 video_translate.py 透传给服务端；不在 --help 中展示，
+    # 终端用户不应通过 audio_translate 的命令行使用此开关（它要求输入是视频，与音频翻译入口职责冲突）。
+    p.add_argument('--enable-visual-diarization', dest='enable_visual_diarization',
+                   action='store_true', default=False, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     client = RemoteScriptClient(args.server)

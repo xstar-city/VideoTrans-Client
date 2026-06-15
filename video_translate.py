@@ -52,7 +52,7 @@ def process_video_pipeline(
     *,
     source: str = "zh",
     separate: bool = True,
-    detect_flexsed_event: bool = False,
+    detect_nonverbal_and_singing: bool = True,
     denoise: str = "aggressive",
     asr_mode: str = "precise",
     translation_models: str = "",
@@ -63,16 +63,27 @@ def process_video_pipeline(
     extra_translation_guideline: str | None = None,
     max_video_slowdown_pct: float = 0.1,
     max_video_speedup_pct: float = 0.2,
+    enable_visual_diarization: bool = False,
 ):
-    """视频翻译主流程：提取音频 → 远程翻译 → 本地视频同步 + 合并音轨。"""
+    """视频翻译主流程：提取音频 → 远程翻译 → 本地视频同步 + 合并音轨。
+
+    上传策略：
+        - enable_visual_diarization=False（默认）：本地 ffmpeg 抽 mp3 → 上传 mp3 给服务端，
+          节省上传带宽（mp3 体积 ~ mp4 视频流的 1/10）。
+        - enable_visual_diarization=True：跳过本地抽音频，直接上传完整 mp4，
+          供服务端在 diarization 阶段结合视觉信号辅助说话人切分。
+    """
     use_gpu = detect_gpu_available()
     gpu_status = "GPU 加速" if use_gpu else "CPU 模式"
-    print(f"\n处理 {len(video_paths)} 个视频文件... (视频同步/合并: {gpu_status})")
+    upload_mode = "上传视频" if enable_visual_diarization else "上传音频"
+    print(f"\n处理 {len(video_paths)} 个视频文件... ({upload_mode}; 视频同步/合并: {gpu_status})")
 
     target_codes = normalize_target_language_codes(targets)
 
-    # ── Step 1: 本地提取音频 ──────────────────────────────
-    print("\n--- Step 1: 提取音频 ---")
+    # ── Step 1: 准备上传素材 ───────────────────────────────
+    # - 默认走"本地抽 mp3 → 上传 mp3"路径，省带宽
+    # - 开启 enable_visual_diarization 则直接上传 mp4，让服务端在 diarization 阶段使用视觉信息
+    print("\n--- Step 1: 准备上传素材 ---")
     video_data: dict[Path, dict] = {}
 
     for video_path in video_paths:
@@ -88,36 +99,42 @@ def process_video_pipeline(
             print(f"所有目标视频已存在，跳过: {video_path}")
             continue
 
-        mp3_path = video_path.with_suffix(".mp3")
-        video_data[video_path] = {"mp3": mp3_path}
-
-        if mp3_path.exists():
-            print(f"音频已存在: {mp3_path}，跳过提取。")
+        if enable_visual_diarization:
+            # 直接以 mp4 作为上传对象
+            video_data[video_path] = {"upload": video_path}
+            print(f"视觉 diarization 已启用，将直接上传视频: {video_path.name}")
         else:
-            try:
-                print(f"提取音频: {video_path.name}...")
-                extract_audio_ffmpeg(video_path, mp3_path)
-            except Exception as e:
-                print(f"提取音频失败 {video_path}: {e}")
-                del video_data[video_path]
+            # 默认行为：本地抽 mp3
+            mp3_path = video_path.with_suffix(".mp3")
+            video_data[video_path] = {"upload": mp3_path}
+
+            if mp3_path.exists():
+                print(f"音频已存在: {mp3_path}，跳过提取。")
+            else:
+                try:
+                    print(f"提取音频: {video_path.name}...")
+                    extract_audio_ffmpeg(video_path, mp3_path)
+                except Exception as e:
+                    print(f"提取音频失败 {video_path}: {e}")
+                    del video_data[video_path]
 
     # ── Step 2: 远程音频翻译（直接调用 audio_translate.main()）──
     # 注意：不使用 subprocess，否则 Windows 下 Ctrl+C 无法传递给子进程
     print("\n--- Step 2: 远程音频翻译 ---")
-    audio_paths = [data["mp3"] for data in video_data.values()]
+    upload_paths = [data["upload"] for data in video_data.values()]
 
-    if audio_paths:
+    if upload_paths:
         # 构造 audio_translate.py 的命令行参数并直接调用
         audio_argv = [
-            *[str(p) for p in audio_paths],
+            *[str(p) for p in upload_paths],
             "--target", *target_codes,
             "--source", source,
             "--server", server_url,
         ]
         if not separate:
             audio_argv.append("--no-separate")
-        if detect_flexsed_event:
-            audio_argv.append("--detect-flexsed-event")
+        if not detect_nonverbal_and_singing:
+            audio_argv.append("--no-detect-nonverbal-and-singing")
         audio_argv.extend(["--denoise", denoise])
         audio_argv.extend(["--asr-mode", asr_mode])
         if translation_models:
@@ -130,6 +147,9 @@ def process_video_pipeline(
         audio_argv.extend(["--max-video-speedup-pct", str(max_video_speedup_pct)])
         if extra_translation_guideline:
             audio_argv.extend(["--extra-translation-guideline", extra_translation_guideline])
+
+        if enable_visual_diarization:
+            audio_argv.append("--enable-visual-diarization")
 
         print(f"调用 audio_translate.py (server={server_url})...")
         # 临时替换 sys.argv 以直接调用 audio_translate.main()
@@ -157,7 +177,9 @@ def process_video_pipeline(
                     print(f"目标视频已存在，跳过: {out_video}")
                     continue
 
-                mp3_path = data["mp3"]
+                mp3_path = data["upload"]
+                # segments 目录由 upload 文件的 parent 决定（视频/mp3 同父目录），
+                # 所以 build_segments_dir(upload) 与 build_segments_dir(video_path) 等价。
                 segments_dir = build_segments_dir(mp3_path)
                 lang_dir = segments_dir / get_language_dir_name(code)
                 final_audio = lang_dir / FINAL_AUDIO_FILENAME
@@ -199,15 +221,19 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['gemini-3.1-flash-lite','deepseek-v4-flash', 'doubao-seed-2-0-lite', 'deepseek-v4-pro','doubao-seed-2-0-pro']
+DEFAULT_MODELS = ['deepseek-v4-pro', 'gemini-3.1-flash-lite','doubao-seed-2-0-pro']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 → 远程翻译 → 本地视频同步")
     p.add_argument("inputs", nargs="+", help="本地视频文件路径列表（如 一个或者多个mp4）。")
     p.add_argument('--target', '-t', dest='targets', nargs='+', default=['en'], choices=ALL_TTS_LANGUAGE_CODES, help='要翻译输出的目标语言代码，默认：en（English）')
     p.add_argument('--source', '-s', default='zh', choices=ALL_ASR_LANGUAGE_CODES, help='输入音频的源语言代码（例如 en, zh），默认：zh（普通话，也支持中国方言），一般中文和英文视频，此参数可不管')
-    p.add_argument('--no-separate', action='store_true', help='跳过人声分离，保留原始音频（默认会运行人声分离以去除背景音）。')
-    p.add_argument('--detect-flexsed-event', action='store_true', help='在分离过程中启用 FlexSED 事件检测和下游 LLM 过滤（默认禁用）。')
+    p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
+                   help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
+    p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=True,
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。'
+                        '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
+                        '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='音频降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
@@ -219,7 +245,15 @@ def main():
     p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
     p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
+    p.add_argument('--enable-visual-diarization', action=argparse.BooleanOptionalAction, default=False,
+                   help='是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭。'
+                        '关闭时本地抽 mp3 上传服务端（带宽友好）；'
+                        '开启时直接上传完整 mp4，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
+                        '视觉信号辅助说话人切分（当前为占位开关，服务端实际功能尚未实现）。')
+
     p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
+
+    
     args = p.parse_args()
 
     # 解析输入路径
@@ -251,8 +285,8 @@ def main():
             args.targets,
             args.server,
             source=args.source,
-            separate=not args.no_separate,
-            detect_flexsed_event=args.detect_flexsed_event,
+            separate=args.separate,
+            detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
             denoise=args.denoise,
             asr_mode=args.asr_mode,
             translation_models=args.translation_models,
@@ -263,6 +297,7 @@ def main():
             extra_translation_guideline=args.extra_translation_guideline,
             max_video_slowdown_pct=args.max_video_slowdown_pct,
             max_video_speedup_pct=args.max_video_speedup_pct,
+            enable_visual_diarization=args.enable_visual_diarization,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

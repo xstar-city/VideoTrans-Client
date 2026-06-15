@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -23,14 +24,13 @@ from video_translate import process_video_pipeline
 
 
 def main():
-    import argparse
-
     p = argparse.ArgumentParser(description="基本模式视频翻译（预置最优参数：basic ASR + independent 翻译 + 禁用音频变速）")
     # ── 用户常用参数 ──
     p.add_argument("inputs", nargs="+", help="本地视频文件路径")
     p.add_argument("--target", "-t", dest="targets", nargs="+", default=["en"], help="目标语言代码，默认：en")
     p.add_argument("--source", "-s", default="zh", help="源语言代码，默认：zh")
-    p.add_argument("--no-separate", action="store_true", help="跳过人声分离，保留原始音频（默认会运行人声分离）")
+    p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
+                   help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
     p.add_argument("--server", default="http://localhost:8000", help="服务端地址，默认：http://localhost:8000")
     # ── 可覆盖的预置参数 ──
     p.add_argument("--denoise", choices=["none", "normal", "aggressive"], default="aggressive", help="音频降噪类型，默认：aggressive")
@@ -67,9 +67,9 @@ def main():
             args.targets,
             args.server,
             source=args.source,
-            separate=not args.no_separate,
+            separate=args.separate,
             # ── 基本模式预置参数 ──
-            detect_flexsed_event=False,      # 基本模式无需 FlexSED 事件检测
+            detect_nonverbal_and_singing=False,  # 基本模式无需「非语言人声 + 唱歌」检测
             denoise=args.denoise,
             asr_mode="basic",               # 基本模式使用 ASR 自带说话人切分
             translation_models=args.translation_models,

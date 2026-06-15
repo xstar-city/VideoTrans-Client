@@ -202,7 +202,7 @@ python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--no-separate` | 跳过人声分离 | 否（默认启用） |
+| `--separate` / `--no-separate` | 是否启用人声分离（去背景音）。默认开启；传 `--no-separate` 关闭。 | 启用 |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |

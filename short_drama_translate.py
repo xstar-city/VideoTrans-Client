@@ -198,7 +198,7 @@ def process_batch(
     *,
     source: str = "zh",
     separate: bool = True,
-    detect_flexsed_event: bool = False,
+    detect_nonverbal_and_singing: bool = True,
     denoise: str = "aggressive",
     translation_models: str = "",
     tts_aware_max_retries: int = 3,
@@ -265,8 +265,8 @@ def process_batch(
         ]
         if not separate:
             cmd.append("--no-separate")
-        if detect_flexsed_event:
-            cmd.append("--detect-flexsed-event")
+        if not detect_nonverbal_and_singing:
+            cmd.append("--no-detect-nonverbal-and-singing")
         cmd.extend(["--denoise", denoise])
         if translation_models:
             cmd.extend(["--translation-models", translation_models])
@@ -348,10 +348,12 @@ def main():
                    help='要翻译输出的目标语言代码，默认：en（English）')
     p.add_argument('--source', '-s', default='zh', choices=ALL_ASR_LANGUAGE_CODES,
                    help='输入音频的源语言代码，默认：zh（普通话，也支持中国方言）')
-    p.add_argument('--no-separate', action='store_true',
-                   help='跳过人声分离，保留原始音频（默认会运行人声分离以去除背景音）。')
-    p.add_argument('--detect-flexsed-event', action='store_true',
-                   help='在分离过程中启用 FlexSED 事件检测和下游 LLM 过滤（默认禁用）。')
+    p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
+                   help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
+    p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=True,
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。'
+                        '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
+                        '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive',
                    help='降噪类型（需要人声分离）。默认：aggressive')
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS),
@@ -414,8 +416,8 @@ def main():
             list(missing_targets),
             args.server,
             source=args.source,
-            separate=not args.no_separate,
-            detect_flexsed_event=args.detect_flexsed_event,
+            separate=args.separate,
+            detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
             denoise=args.denoise,
             translation_models=args.translation_models,
             tts_aware_max_retries=args.tts_aware_max_retries,
