@@ -17,8 +17,8 @@
     - Common/ 下的共享模块
 
 示例：
-    python video_translate.py "video.mp4" -t en --server http://<ServerIP>:8000 -s
-    python video_translate.py "a.mp4" "b.mp4" -t en --server http://<ServerIP>:8000 -s
+    python video_translate.py "video.mp4" -t en --server <ServerIP>
+    python video_translate.py "a.mp4" "b.mp4" -t en --server <ServerIP>
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from Common.video_utils import (
     mux_audio_into_video,
     sync_video_to_audio,
 )
+from remote_client import normalize_server_url
 
 
 # ============================================================
@@ -251,7 +252,7 @@ def main():
                         '开启时直接上传完整 mp4，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
                         '视觉信号辅助说话人切分（当前为占位开关，服务端实际功能尚未实现）。')
 
-    p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
+    p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
 
     
     args = p.parse_args()
@@ -283,7 +284,7 @@ def main():
         process_video_pipeline(
             video_paths,
             args.targets,
-            args.server,
+            server_url,
             source=args.source,
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,

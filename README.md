@@ -5,7 +5,7 @@
 一行命令，将视频翻译成上百种语言。
 
 ```bash
-python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server http://<ServerIP>:8000
+python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server <ServerIP>
 ```
 
 **两个维度的批量处理：**
@@ -20,22 +20,22 @@ python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server http://<Serv
 
 ```bash
 # 单个视频 → 英语
-python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
+python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 # 多个视频 + 多个语种
-python video_translate.py "1.mp4" "2.mp4" -t en hi ja --server http://<ServerIP>:8000
+python video_translate.py "1.mp4" "2.mp4" -t en hi ja --server <ServerIP>
 ```
 
 ### 2. 翻译音频
 
 ```bash
-python audio_translate.py "1.mp3" -t en --server http://<ServerIP>:8000
+python audio_translate.py "1.mp3" -t en --server <ServerIP>
 ```
 
 ### 3. 批量短剧翻译
 
 ```bash
-python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server http://<ServerIP>:8000
+python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server <ServerIP>
 ```
 
 脚本自动：整理视频到标准目录 → 转换非 mp4 格式 → 跳过已翻译视频 → 按语种分组批量处理。
@@ -180,7 +180,7 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 适合单人讲座、教学视频、播客等单人主讲场景，预置精简参数，命令更简洁：
 
 ```bash
-python video_translate_basic.py "1.mp4" -t en --server http://<ServerIP>:8000
+python video_translate_basic.py "1.mp4" -t en --server <ServerIP>
 ```
 
 预置设置：
@@ -194,7 +194,7 @@ python video_translate_basic.py "1.mp4" -t en --server http://<ServerIP>:8000
 
 ```bash
 # 默认高级参数
-python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
+python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 ```
 
@@ -246,8 +246,8 @@ python video_translate.py "1.mp4" -t en --server http://<ServerIP>:8000
 仅翻译音频文件，不涉及视频处理：
 
 ```bash
-python audio_translate.py "1.mp3" -t en --server http://<ServerIP>:8000
-python audio_translate.py "1.mp3" "2.mp3" -t en hi --server http://<ServerIP>:8000
+python audio_translate.py "1.mp3" -t en --server <ServerIP>
+python audio_translate.py "1.mp3" "2.mp3" -t en hi --server <ServerIP>
 ```
 
 ### 批量短剧翻译 `short_drama_translate.py`
@@ -255,7 +255,7 @@ python audio_translate.py "1.mp3" "2.mp3" -t en hi --server http://<ServerIP>:80
 翻译整部短剧（含多个视频片段）：
 
 ```bash
-python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server http://<ServerIP>:8000
+python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server <ServerIP>
 ```
 
 批量翻译任务可能运行数小时，中途退出后重新执行同样命令即可续跑——已完成的步骤会自动跳过。详见 [批量翻译断点续跑说明.md](批量翻译断点续跑说明.md)。

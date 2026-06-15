@@ -24,6 +24,20 @@ from typing import Optional
 import requests
 
 
+def normalize_server_url(server: str, port: int = 8000) -> str:
+    """将用户输入的服务端地址规范化为完整 URL。
+
+    支持的输入形式：
+      - "1.2.3.4"       → "http://1.2.3.4:8000"
+      - "my-server"     → "http://my-server:8000"
+      - "http://..."    → 原样返回（向后兼容）
+      - "https://..."   → 原样返回（向后兼容）
+    """
+    if server.startswith("http://") or server.startswith("https://"):
+        return server
+    return f"http://{server}:{port}"
+
+
 class RemoteScriptClient:
     """通用远程脚本执行客户端"""
 

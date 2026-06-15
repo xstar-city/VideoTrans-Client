@@ -4,7 +4,7 @@
 将音频文件上传到服务端远程执行翻译流水线，实时查看步骤进度，增量下载翻译结果到本地。
 
 用法：
-    python audio_translate.py input.mp3 -t en --server http://<ServerIP>:8000
+    python audio_translate.py input.mp3 -t en --server <ServerIP>
 
 断点续跑（task_id 机制）：
     客户端与服务端为一对一模式：一个 task_id 对应一个固定的工作目录。
@@ -38,7 +38,7 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 
 
-from remote_client import RemoteScriptClient
+from remote_client import RemoteScriptClient, normalize_server_url
 
 
 # ─── task_id 持久化 ───────────────────────────────────────
@@ -296,7 +296,7 @@ def main():
     p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
     p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
-    p.add_argument('--server', default='http://localhost:8000', help='服务端地址 (默认: http://localhost:8000)')
+    p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
     # 内部参数：仅供客户端 video_translate.py 透传给服务端；不在 --help 中展示，
     # 终端用户不应通过 audio_translate 的命令行使用此开关（它要求输入是视频，与音频翻译入口职责冲突）。
@@ -304,7 +304,8 @@ def main():
                    action='store_true', default=False, help=argparse.SUPPRESS)
     args = p.parse_args()
 
-    client = RemoteScriptClient(args.server)
+    server_url = normalize_server_url(args.server)
+    client = RemoteScriptClient(server_url)
 
     # ── 预检：验证服务端可达 ──────────────────────────────────
     try:

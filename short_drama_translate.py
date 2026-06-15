@@ -17,7 +17,7 @@
     - Common/ 下的共享模块
 
 示例：
-    python short_drama_translate.py "E:\\短剧\\《逐玉》" -t en --server http://<ServerIP>:8000 -s
+    python short_drama_translate.py "E:\\短剧\\《逐玉》" -t en --server <ServerIP>
 """
 
 from __future__ import annotations
@@ -366,9 +366,10 @@ def main():
     p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
     p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
-    p.add_argument('--server', default='http://localhost:8000',
-                   help='服务端地址 (默认: http://localhost:8000)')
+    p.add_argument('--server', default='localhost',
+                   help='服务端 IP 地址 (默认: localhost)')
     args = p.parse_args()
+    server_url = normalize_server_url(args.server)
 
     root_dir = Path(args.input_dir).resolve()
     if not root_dir.exists() or not root_dir.is_dir():
@@ -414,7 +415,7 @@ def main():
         process_batch(
             video_paths,
             list(missing_targets),
-            args.server,
+            server_url,
             source=args.source,
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,

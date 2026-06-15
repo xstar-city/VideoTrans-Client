@@ -7,8 +7,8 @@
 - 音频变速：禁用（保持原速）
 
 使用方式：
-    python video_translate_solo.py "video.mp4" -t en --server http://<IP>:8000 -s
-    python video_translate_solo.py "a.mp4" "b.mp4" -t en ja --server http://<IP>:8000 -s
+    python video_translate_solo.py "video.mp4" -t en --server <IP>
+    python video_translate_solo.py "a.mp4" "b.mp4" -t en ja --server <IP>
 
 与 video_translate.py 的区别仅在于默认参数，所有完整参数仍可通过命令行覆盖。
 """
@@ -31,7 +31,7 @@ def main():
     p.add_argument("--source", "-s", default="zh", help="源语言代码，默认：zh")
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
-    p.add_argument("--server", default="http://localhost:8000", help="服务端地址，默认：http://localhost:8000")
+    p.add_argument("--server", default="localhost", help="服务端 IP 地址，默认：localhost")
     # ── 可覆盖的预置参数 ──
     p.add_argument("--denoise", choices=["none", "normal", "aggressive"], default="aggressive", help="音频降噪类型，默认：aggressive")
     p.add_argument("--translation-models", default="", help="翻译模型列表，空值使用默认模型")
@@ -65,7 +65,7 @@ def main():
         process_video_pipeline(
             video_paths,
             args.targets,
-            args.server,
+            normalize_server_url(args.server),
             source=args.source,
             separate=args.separate,
             # ── 基本模式预置参数 ──
