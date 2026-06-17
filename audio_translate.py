@@ -361,6 +361,50 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
     return missing
 
 
+def _find_local_only_files(
+    client: RemoteScriptClient, task_id: str,
+    local_dir: Path, sub_dir: str = ""
+) -> list[str]:
+    """检查本地存在但服务端不存在的同步管理文件（.mp3/.txt/.srt）。
+
+    与 _verify_sync 互补：_verify_sync 检查"服务端→本地"方向（服务端有的文件本地是否也有），
+    此函数检查"本地→服务端"方向（本地有的文件服务端是否也有）。
+
+    返回多余本地文件的相对路径列表。
+    """
+    extras = []
+
+    if not local_dir.exists():
+        return extras
+
+    try:
+        result = client.list_files(task_id, sub_dir=sub_dir, since=0)
+    except Exception:
+        # 无法连接服务端时跳过此目录的检查
+        return extras
+
+    server_file_names: set[str] = set()
+    for item in result.get("items", []):
+        if item["type"] == "file":
+            server_file_names.add(item["name"])
+
+    for local_file in local_dir.iterdir():
+        if local_file.name.startswith('.'):
+            continue
+        if local_file.is_dir():
+            child_sub = f"{sub_dir}/{local_file.name}" if sub_dir else local_file.name
+            child_extras = _find_local_only_files(
+                client, task_id, local_file, sub_dir=child_sub
+            )
+            extras.extend(child_extras)
+        elif local_file.suffix.lower() in _SYNC_MANAGED_EXTS:
+            if local_file.name not in server_file_names:
+                rel = f"{sub_dir}/{local_file.name}" if sub_dir else local_file.name
+                extras.append(f"{rel} (服务端不存在)")
+
+    return extras
+
+
 # ─── 主流程 ────────────────────────────────────────────────
 
 def main():
@@ -394,6 +438,8 @@ def main():
     p.add_argument('--enable-visual-diarization', dest='enable_visual_diarization',
                    action='store_true', default=False, help=argparse.SUPPRESS)
     args = p.parse_args()
+
+    task_start_time = time.time()
 
     server_url = normalize_server_url(args.server)
     client = RemoteScriptClient(server_url)
@@ -606,8 +652,37 @@ def main():
         print("文件同步不完整，无法进行后续视频合成。请重跑以恢复同步。")
         print(f"task_id={task_id} 已保存。")
         sys.exit(1)
-    else:
-        print("所有文件同步完成。")
+
+    # ── 6. 最终清理 + 双向校验 ──────────────────────────────
+    # 经过 3 轮同步重试后，再执行一次孤儿文件清理（删除本地有但服务端没有的过时文件），
+    # 然后验证本地与服务端文件一一对应。
+    # _verify_sync 已确保"服务端有的文件本地也有"，
+    # 此步骤先删除"本地有但服务端没有"的残留文件，再做最终确认。
+    for local_dir, dest_dir in input_sync_info:
+        _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0,
+                    cleanup_stale=True)
+
+    # 验证：清理后确认本地与服务端文件一一对应
+    extra_local = []
+    for local_dir, dest_dir in input_sync_info:
+        extras = _find_local_only_files(client, task_id, local_dir, sub_dir=dest_dir)
+        extra_local.extend(extras)
+
+    if extra_local:
+        print(f"\n[错误] 清理后仍有 {len(extra_local)} 个本地文件在服务端不存在：")
+        for f in extra_local[:20]:
+            print(f"  - {f}")
+        if len(extra_local) > 20:
+            print(f"  ...等共 {len(extra_local)} 个")
+        print("客户端与服务端文件不一致，请重跑以恢复同步。")
+        print(f"task_id={task_id} 已保存。")
+        sys.exit(1)
+
+    elapsed = time.time() - task_start_time
+    mins, secs = divmod(int(elapsed), 60)
+    hours, mins = divmod(mins, 60)
+    print(f"所有文件同步完成，客户端与服务端文件一一对应。")
+    print(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
 
 
 if __name__ == '__main__':
