@@ -227,14 +227,57 @@ def _build_remote_args(args) -> list[str]:
     return remote_args
 
 
+# 客户端可见文件扩展名（与服务端 client_visibility.py 白名单一致）
+# 仅这些扩展名的文件参与孤儿清理，其他文件（.mp4/.wav/隐藏文件等）不受影响
+_SYNC_MANAGED_EXTS = frozenset({'.mp3', '.txt', '.srt'})
+
+
+def _cleanup_stale_sync_files(local_dir: Path, server_names: set[str]) -> int:
+    """删除本地存在但服务端已不存在的同步管理文件（.mp3/.txt/.srt）。
+
+    这些文件通常是因为服务端重命名/重新生成后，旧文件残留在客户端。
+    典型场景：VAD 裁剪将 132.700.mp3 改名为 132.920.mp3，
+    服务端已删除旧文件但客户端仍残留。
+
+    返回删除的文件数。
+    """
+    if not local_dir.exists():
+        return 0
+    removed = 0
+    for local_file in local_dir.iterdir():
+        if local_file.is_dir():
+            continue
+        # 隐藏文件（.vt_task_id 等）不动
+        if local_file.name.startswith('.'):
+            continue
+        # 仅清理同步管理扩展名
+        if local_file.suffix.lower() not in _SYNC_MANAGED_EXTS:
+            continue
+        if local_file.name not in server_names:
+            local_file.unlink()
+            removed += 1
+    if removed:
+        print(f"  清理了 {removed} 个过时文件（服务端已不再有）: {local_dir.name}/")
+    return removed
+
+
 def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
-                sub_dir: str = "", since: float = 0) -> float:
-    """从服务端增量下载文件到本地目录，返回最新的 mtime。"""
+                sub_dir: str = "", since: float = 0,
+                cleanup_stale: bool = False) -> float:
+    """从服务端增量下载文件到本地目录，返回最新的 mtime。
+
+    cleanup_stale=True 时，同步完成后删除本地过时文件
+    （服务端已不存在的 .mp3/.txt/.srt，如 VAD 裁剪改名后的旧文件）。
+    """
     result = client.list_files(task_id, sub_dir=sub_dir, since=since)
     latest_mtime = since
 
+    # 记录服务端可见条目名，用于清理本地孤儿文件
+    server_names: set[str] = set()
+
     for item in result.get("items", []):
         name = item["name"]
+        server_names.add(name)
         mtime = item.get("mtime", 0)
         if mtime > latest_mtime:
             latest_mtime = mtime
@@ -247,6 +290,7 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 client, task_id, local_sub,
                 sub_dir=f"{sub_dir}/{name}" if sub_dir else name,
                 since=since,
+                cleanup_stale=cleanup_stale,
             )
             if sub_latest > latest_mtime:
                 latest_mtime = sub_latest
@@ -265,9 +309,56 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
             try:
                 client.download(task_id, remote_path, local_path=local_file)
             except Exception as e:
-                print(f"  下载失败 {remote_path}: {e}")
+                if "404" in str(e):
+                    # 文件在列表获取后被改名/删除（如 VAD 裁剪改名），下一轮同步会拿到新文件名
+                    pass
+                else:
+                    print(f"  下载失败 {remote_path}: {e}")
+
+    # 清理孤儿文件（仅在最终同步时执行，避免轮询期间临时清空）
+    if cleanup_stale:
+        _cleanup_stale_sync_files(local_dir, server_names)
 
     return latest_mtime
+
+
+def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
+                 sub_dir: str = "") -> list[str]:
+    """验证本地文件与服务端一致，返回缺失或大小不匹配的文件路径列表。
+
+    与 _sync_files 不同，此函数只检查不下载，用于最终确认所有文件已同步完成。
+    """
+    missing = []
+    try:
+        result = client.list_files(task_id, sub_dir=sub_dir, since=0)
+    except Exception:
+        # 无法连接服务端时，无法验证，返回空列表
+        return missing
+
+    for item in result.get("items", []):
+        name = item["name"]
+        if item["type"] == "dir":
+            # 递归验证子目录
+            local_sub = local_dir / name
+            sub_missing = _verify_sync(
+                client, task_id, local_sub,
+                sub_dir=f"{sub_dir}/{name}" if sub_dir else name,
+            )
+            missing.extend(sub_missing)
+        else:
+            local_file = local_dir / name
+            remote_path = f"{sub_dir}/{name}" if sub_dir else name
+            remote_size = item.get("size", -1)
+            if not local_file.exists():
+                missing.append(remote_path)
+            elif remote_size >= 0:
+                try:
+                    local_size = local_file.stat().st_size
+                    if local_size != remote_size:
+                        missing.append(f"{remote_path} (大小不匹配: 本地{local_size} vs 服务端{remote_size})")
+                except OSError:
+                    missing.append(remote_path)
+    return missing
 
 
 # ─── 主流程 ────────────────────────────────────────────────
@@ -419,8 +510,7 @@ def main():
             sys.exit(1)
         raise
 
-    # ── 4. 轮询 + 增量下载 ──────────────────────────────
-    last_sync_time = 0.0   # 增量查询基准：服务端文件 mtime
+    # ── 4. 轮询 + 全量扫描下载 ──────────────────────────────
     last_sync_check = 0.0  # 同步频率控制：wall clock
     last_line = 0
 
@@ -431,7 +521,7 @@ def main():
         input_sync_info.append((p.parent, _compute_dest_dir(p)))
 
     def on_progress(status_info):
-        nonlocal last_sync_time, last_sync_check, last_line
+        nonlocal last_sync_check, last_line
 
         # 打印增量日志
         stdout = status_info.get("stdout", "")
@@ -439,20 +529,15 @@ def main():
             print(stdout, end='', flush=True)
         last_line = status_info.get("total_lines", last_line)
 
-        # 每 3 秒增量下载：按每个输入的子目录分别同步
+        # 每 3 秒全量扫描下载：确保之前下载失败的文件被重试
         now = time.time()
         if now - last_sync_check >= 3.0:
             try:
-                max_mtime = last_sync_time
                 for local_dir, dest_dir in input_sync_info:
-                    synced_mtime = _sync_files(
+                    _sync_files(
                         client, task_id, local_dir,
-                        sub_dir=dest_dir, since=last_sync_time
+                        sub_dir=dest_dir, since=0
                     )
-                    if synced_mtime > max_mtime:
-                        max_mtime = synced_mtime
-                if max_mtime > last_sync_time:
-                    last_sync_time = max_mtime
             except Exception:
                 pass
             last_sync_check = now
@@ -490,12 +575,39 @@ def main():
             print(f"  无法查询服务端状态，task_id={task_id} 已保存，可重新运行此命令恢复。")
         sys.exit(1)
 
-    # ── 5. 最终全量同步 ─────────────────────────────────
-    print("\n同步最终结果...")
-    for local_dir, dest_dir in input_sync_info:
-        _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0)
+    # ── 5. 最终全量同步（带验证和重试） ─────────────────────
+    MAX_SYNC_ROUNDS = 3
+    all_missing = []
+    for round_num in range(1, MAX_SYNC_ROUNDS + 1):
+        # 全量扫描下载（首轮启用孤儿文件清理：删除服务端已改名/删除但本地仍残留的文件）
+        for local_dir, dest_dir in input_sync_info:
+            _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0,
+                        cleanup_stale=(round_num == 1))
 
-    print("完成!")
+        # 验证：检查服务端所有可见文件是否已同步到本地
+        all_missing = []
+        for local_dir, dest_dir in input_sync_info:
+            missing = _verify_sync(client, task_id, local_dir, sub_dir=dest_dir)
+            all_missing.extend(missing)
+
+        if not all_missing:
+            break
+
+        if round_num < MAX_SYNC_ROUNDS:
+            print(f"  仍有 {len(all_missing)} 个文件未同步完成，2秒后重试 (第{round_num+1}/{MAX_SYNC_ROUNDS}轮)...")
+            time.sleep(2)
+
+    if all_missing:
+        print(f"\n[错误] 以下 {len(all_missing)} 个文件未能同步到本地：")
+        for f in all_missing[:20]:
+            print(f"  - {f}")
+        if len(all_missing) > 20:
+            print(f"  ...等共 {len(all_missing)} 个")
+        print("文件同步不完整，无法进行后续视频合成。请重跑以恢复同步。")
+        print(f"task_id={task_id} 已保存。")
+        sys.exit(1)
+    else:
+        print("所有文件同步完成。")
 
 
 if __name__ == '__main__':

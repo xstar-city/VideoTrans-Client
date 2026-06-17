@@ -42,14 +42,15 @@ class RemoteScriptClient:
     """通用远程脚本执行客户端"""
 
     def __init__(self, base_url: str, api_key: Optional[str] = None,
-                 timeout: tuple[float, float] | float = (10, 300)):
+                 timeout: tuple[float, float] | float = (30, 300)):
         """
         参数:
             base_url: 服务端地址，如 "http://<ServerIP>:8000"
             api_key: 可选，API 密钥（预留，服务端暂未实现鉴权）
             timeout: 单次 HTTP 请求超时（秒），支持两种格式：
-                     - 元组 (connect_timeout, read_timeout)，如 (10, 300)
-                       connect_timeout: 建立连接的超时（秒），默认 10s
+                     - 元组 (connect_timeout, read_timeout)，如 (30, 300)
+                       connect_timeout: 建立连接的超时（秒），默认 30s
+                                        （跨公网瞬时延迟较常见，太小容易误判断开）
                        read_timeout: 等待响应的超时（秒），默认 300s
                      - 单个数字: 同时用于连接和读取（兼容旧用法）
         """
@@ -240,6 +241,7 @@ class RemoteScriptClient:
 
     def wait(self, task_id: str, poll_interval: float = 2.0,
              timeout: float = 900.0,
+             network_retry_seconds: float = 60.0,
              on_progress: Optional[callable] = None) -> dict:
         """
         轮询等待任务完成
@@ -248,25 +250,74 @@ class RemoteScriptClient:
         就不会超时；仅当连续 timeout 秒无新输出时才判定超时。
         这确保长时间任务（如 100+ 段 TTS 翻译）不会被挂钟上限误杀。
 
+        网络容错：HTTP 请求出现瞬时网络故障（连接超时、断开、读超时等）时，
+        不会立刻终止，而是打印警告并继续重试，直到累计连续失败时间超过
+        network_retry_seconds 才放弃。这避免了客户端因短暂网络抖动
+        （服务端仍在正常跑）就杀掉整个进程。
+
         参数:
             task_id: 任务 ID
             poll_interval: 轮询间隔（秒）
             timeout: 最大无输出空闲时间（秒），默认 900s（15 分钟）
+            network_retry_seconds: 网络故障最大累计容忍时长（秒），
+                                   默认 60s。期间任何一次成功都会清零计数。
             on_progress: 可选回调，每次轮询时调用，参数为 status dict
 
         返回:
             最终的 status dict
 
         异常:
-            TimeoutError: 活跃度超时（长时间无新输出）
+            TimeoutError: 活跃度超时（长时间无新输出）或网络持续不通
             RuntimeError: 任务失败或被取消
+            KeyboardInterrupt: 透传给上层（不会被捕获）
         """
         since_line = 0
         last_raw_total_lines = 0
         last_activity_time = time.time()
+        # 网络抖动重试状态
+        network_failure_start: float | None = None
+        consecutive_failures = 0
 
         while True:
-            info = self.status(task_id, since_line=since_line)
+            try:
+                info = self.status(task_id, since_line=since_line)
+            except KeyboardInterrupt:
+                # 上层负责处理 Ctrl+C，不在这里吞掉
+                raise
+            except (
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.HTTPError,
+            ) as e:
+                # 网络层瞬时故障：累计计时，超过阈值才放弃
+                now = time.time()
+                if network_failure_start is None:
+                    network_failure_start = now
+                consecutive_failures += 1
+                elapsed = now - network_failure_start
+
+                if elapsed > network_retry_seconds:
+                    raise TimeoutError(
+                        f"任务 {task_id} 网络持续不通已 {elapsed:.0f}s "
+                        f"(连续 {consecutive_failures} 次失败)，最后错误: {e}"
+                    )
+
+                print(
+                    f"  [网络抖动] 第 {consecutive_failures} 次失败 "
+                    f"(累计 {elapsed:.0f}s/{network_retry_seconds:.0f}s)，"
+                    f"将重连并继续轮询... ({type(e).__name__})"
+                )
+                # 网络抖动期间冻结活跃度时钟，不能把没收到响应当作"任务无输出"
+                last_activity_time = now
+                time.sleep(poll_interval)
+                continue
+
+            # 成功一次：重置网络失败计数
+            if network_failure_start is not None:
+                print(f"  [网络已恢复] 重连成功，继续轮询")
+                network_failure_start = None
+                consecutive_failures = 0
 
             if on_progress:
                 on_progress(info)

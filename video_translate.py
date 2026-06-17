@@ -284,7 +284,7 @@ def main():
         process_video_pipeline(
             video_paths,
             args.targets,
-            server_url,
+            normalize_server_url(args.server),
             source=args.source,
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
