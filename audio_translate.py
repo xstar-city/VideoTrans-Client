@@ -28,14 +28,20 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 
 from Common.config import (
     SEGMENTS_DIRNAME,
     ASR_DIRNAME,
+    ASR_FULL_TEXT_FILENAME,
+    ASR_SENTENCE_RECONCILE_FILENAME,
+    SECONDARY_DIARIZATION_CALIBRATE_LOG_FILENAME,
     build_segments_dir,
 )
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
+from Common.language_map import get_language_dir_name
 
 
 from remote_client import RemoteScriptClient, normalize_server_url
@@ -164,6 +170,250 @@ def _find_matching_srt(audio_path: Path) -> Path | None:
     return None
 
 
+# ─── 编辑重跑模式 ─────────────────────────────────────────
+
+# 服务端 segments/ASR/ 下的非 txt 文件（full_text.md 等），对比时跳过
+_ASR_NON_TXT_FILES = frozenset({
+    ASR_FULL_TEXT_FILENAME,  # full_text.md
+    ASR_SENTENCE_RECONCILE_FILENAME,
+    SECONDARY_DIARIZATION_CALIBRATE_LOG_FILENAME,
+})
+
+
+def _check_server_time(client: RemoteScriptClient):
+    """检查客户端与服务端系统时间是否一致，差异过大时打印警告。"""
+    try:
+        result = client.get_server_time()
+    except Exception as e:
+        print(f"[警告] 无法获取服务端时间: {e}")
+        return
+
+    server_time = result.get("server_time", 0)
+    local_time = time.time()
+    offset = server_time - local_time
+    abs_offset = abs(offset)
+
+    if abs_offset > 60:
+        print(f"[强烈警告] 客户端与服务端时间差异 {abs_offset:.1f}s "
+              f"(服务端 {'快' if offset > 0 else '慢'} {abs_offset:.1f}s)！")
+        print(f"  服务端时区: {result.get('timezone', '?')}")
+        print("  时间差异过大会影响文件同步和缓存判断，建议同步系统时间后重试。")
+    elif abs_offset > 5:
+        print(f"[警告] 客户端与服务端时间差异 {abs_offset:.1f}s "
+              f"(服务端 {'快' if offset > 0 else '慢'} {abs_offset:.1f}s)")
+    else:
+        print(f"时间同步检查通过（差异 {abs_offset:.1f}s）")
+
+
+def _download_server_txt(client: RemoteScriptClient, task_id: str,
+                         remote_path: str) -> str | None:
+    """下载服务端 txt 文件内容到内存，返回文本内容。失败返回 None。"""
+    try:
+        resp = requests.get(
+            f"{client.base_url}/download/{task_id}/{remote_path}",
+            headers=client._headers(),
+            timeout=client.timeout,
+            stream=True,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.text
+    except Exception:
+        return None
+
+
+def _detect_and_apply_edits(
+    client: RemoteScriptClient,
+    task_id: str,
+    input_paths: list[Path],
+    target_codes: list[str],
+):
+    """编辑重跑预处理：检测本地编辑 → 上传修改 → 删除下游产物。
+
+    五种检测场景：
+    1. 改 ASR txt：内容不一致 → 上传 + 删除所有语言目录下对应 txt/mp3/md
+    2. 改翻译 txt：内容不一致 → 上传 + 删除该语言目录下对应 mp3/md
+    3. 删语种：本地语言目录不存在 → 删除服务端对应目录
+    4. 删某句 mp3：本地缺失 → 删除服务端对应 mp3
+    5. 删某句 txt：本地缺失 → 删除服务端对应 txt+mp3+md+候选目录
+    """
+    upload_list: list[tuple[Path, str]] = []   # (本地文件路径, 服务端相对路径)
+    delete_files: list[str] = []
+    delete_dirs: list[str] = []
+
+    for input_path in input_paths:
+        p = Path(input_path)
+        dest_dir = _compute_dest_dir(p)
+        local_segments_dir = build_segments_dir(p)
+
+        # ── 递归列出服务端 segments/ 目录结构 ──
+        server_files: dict[str, set[str]] = {}  # {子目录相对路径: {文件名集合}}
+
+        def _list_server_files(sub_dir: str) -> list[dict]:
+            """列出服务端指定子目录的文件和目录"""
+            try:
+                result = client.list_files(task_id, sub_dir=sub_dir, since=0)
+                return result.get("items", [])
+            except Exception:
+                return []
+
+        # 获取服务端 segments/ 下的内容
+        server_segments_subdir = f"{dest_dir}/{SEGMENTS_DIRNAME}"
+        server_segments_items = _list_server_files(server_segments_subdir)
+
+        if not server_segments_items:
+            print(f"[错误] 服务端 {dest_dir}/segments/ 不存在或为空，"
+                  f"请确认任务 {task_id} 已完成过 ASR 阶段。")
+            sys.exit(1)
+
+        # 收集服务端 segments/ASR/ 下的 txt 文件
+        server_asr_subdir = f"{server_segments_subdir}/{ASR_DIRNAME}"
+        server_asr_items = _list_server_files(server_asr_subdir)
+        server_asr_txts: set[str] = set()  # ASR 目录下的 txt 文件名（如 "0.000.txt"）
+        for item in server_asr_items:
+            if item["type"] == "file" and item["name"].endswith(".txt"):
+                if item["name"] not in _ASR_NON_TXT_FILES:
+                    server_asr_txts.add(item["name"])
+
+        # ── 场景 1：检测 ASR txt 内容修改 ──
+        local_asr_dir = local_segments_dir / ASR_DIRNAME
+        changed_asr_stems: set[str] = set()
+
+        if local_asr_dir.exists():
+            for asr_txt_name in server_asr_txts:
+                local_asr_txt = local_asr_dir / asr_txt_name
+                if not local_asr_txt.exists():
+                    continue  # 客户端没有此文件，跳过（不在 ASR 层面处理删除）
+
+                # 下载服务端 txt 内容对比
+                remote_asr_path = f"{server_asr_subdir}/{asr_txt_name}"
+                server_content = _download_server_txt(client, task_id, remote_asr_path)
+                local_content = local_asr_txt.read_text(encoding="utf-8")
+
+                if server_content is not None and server_content != local_content:
+                    stem = asr_txt_name.rsplit(".", 1)[0]
+                    changed_asr_stems.add(stem)
+                    upload_list.append((local_asr_txt, remote_asr_path))
+                    print(f"  [改ASR] {asr_txt_name} 内容已修改")
+
+        if changed_asr_stems:
+            # 对每个语言目录，收集需要删除的文件
+            for code in target_codes:
+                lang_dir_name = get_language_dir_name(code)
+                server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+                for stem in changed_asr_stems:
+                    # 删除翻译 txt + TTS mp3 + 翻译 md
+                    delete_files.append(f"{server_lang_subdir}/{stem}.txt")
+                    delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                    delete_files.append(f"{server_lang_subdir}/{stem}.md")
+
+        # ── 场景 2-5：检测各语言目录的编辑 ──
+        for code in target_codes:
+            lang_dir_name = get_language_dir_name(code)
+            server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+            local_lang_dir = local_segments_dir / lang_dir_name
+
+            # 场景 3：语言目录不存在 → 删除服务端整个目录
+            if not local_lang_dir.exists():
+                # 检查服务端是否有此目录
+                lang_items = _list_server_files(server_lang_subdir)
+                if lang_items:
+                    delete_dirs.append(server_lang_subdir)
+                    print(f"  [删语种] 本地 {lang_dir_name}/ 不存在 → 删除服务端目录")
+                continue
+
+            # 列出服务端语言目录下的文件
+            server_lang_items = _list_server_files(server_lang_subdir)
+            server_lang_files = {
+                item["name"] for item in server_lang_items if item["type"] == "file"
+            }
+
+            # 收集服务端有但本地没有的文件（场景 4、5：客户端删除了某句）
+            for server_file in server_lang_files:
+                if server_file.startswith('.'):
+                    continue
+                local_file = local_lang_dir / server_file
+                if not local_file.exists():
+                    stem = server_file.rsplit(".", 1)[0]
+                    ext = server_file.rsplit(".", 1)[1] if "." in server_file else ""
+
+                    if ext == "mp3":
+                        # 场景 4：删某句 mp3
+                        delete_files.append(f"{server_lang_subdir}/{server_file}")
+                        print(f"  [删mp3] {lang_dir_name}/{server_file} 本地已删除")
+                    elif ext == "txt":
+                        # 场景 5：删某句 txt → 删除 txt + mp3 + md + 候选目录
+                        delete_files.append(f"{server_lang_subdir}/{stem}.txt")
+                        delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                        delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                        delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                        print(f"  [删txt] {lang_dir_name}/{server_file} 本地已删除 → 删除翻译+TTS+候选")
+
+            # 场景 2：检测翻译 txt 内容修改
+            for local_file in local_lang_dir.iterdir():
+                if local_file.name.startswith('.'):
+                    continue
+                if not local_file.is_file():
+                    continue
+                if not local_file.name.endswith(".txt"):
+                    continue
+
+                stem = local_file.name.rsplit(".", 1)[0]
+                server_txt_path = f"{server_lang_subdir}/{local_file.name}"
+
+                # 服务端没有此 txt（可能是客户端新增的翻译，不在编辑重跑场景内，跳过）
+                if local_file.name not in server_lang_files:
+                    continue
+
+                # 下载服务端 txt 对比内容
+                server_content = _download_server_txt(client, task_id, server_txt_path)
+                local_content = local_file.read_text(encoding="utf-8")
+
+                if server_content is not None and server_content != local_content:
+                    # 改翻译 txt → 上传 + 删除对应 mp3 + md
+                    upload_list.append((local_file, server_txt_path))
+                    delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                    delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                    print(f"  [改翻译] {lang_dir_name}/{local_file.name} 内容已修改")
+
+    # ── 执行上传 ──
+    if upload_list:
+        print(f"\n上传 {len(upload_list)} 个修改的 txt 文件...")
+        for local_file, remote_path in upload_list:
+            try:
+                client.upload(local_file, task_id=task_id, dest_path=remote_path)
+                print(f"  已上传: {remote_path}")
+            except Exception as e:
+                print(f"  [错误] 上传失败 {remote_path}: {e}")
+
+    # ── 执行删除 ──
+    if delete_files or delete_dirs:
+        print(f"\n删除 {len(delete_files)} 个文件 + {len(delete_dirs)} 个目录...")
+        try:
+            result = client.delete_files(
+                task_id,
+                files=delete_files,
+                dirs=delete_dirs,
+            )
+            deleted_files = result.get("deleted_files", [])
+            deleted_dirs = result.get("deleted_dirs", [])
+            errors = result.get("errors", [])
+            if deleted_files:
+                print(f"  已删除 {len(deleted_files)} 个文件")
+            if deleted_dirs:
+                print(f"  已删除 {len(deleted_dirs)} 个目录")
+            if errors:
+                print(f"  [警告] {len(errors)} 个删除错误:")
+                for err in errors[:10]:
+                    print(f"    {err}")
+        except Exception as e:
+            print(f"  [错误] 批量删除失败: {e}")
+
+    if not upload_list and not delete_files and not delete_dirs:
+        print("未检测到任何编辑变更，服务端文件已是最新。")
+
+
 def _build_remote_args(args) -> list[str]:
     """将客户端参数转换为服务端脚本的命令行参数。"""
     remote_args = []
@@ -223,6 +473,10 @@ def _build_remote_args(args) -> list[str]:
     # 视觉辅助说话人切分（默认关闭，仅在显式开启时透传）
     if getattr(args, 'enable_visual_diarization', False):
         remote_args.append('--enable-visual-diarization')
+
+    # 编辑重跑模式：透传 --skip-asr 让服务端跳过 ASR 流程
+    if getattr(args, 'edit_rerun', False):
+        remote_args.append('--skip-asr')
 
     return remote_args
 
@@ -433,6 +687,10 @@ def main():
     p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
     p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
+    p.add_argument('--edit-rerun', action='store_true',
+                   help='编辑重跑模式：检测本地编辑（改ASR/改翻译/删语种/删mp3/删txt），'
+                        '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
+                        '要求服务端已有该任务的运行记录。')
     # 内部参数：仅供客户端 video_translate.py 透传给服务端；不在 --help 中展示，
     # 终端用户不应通过 audio_translate 的命令行使用此开关（它要求输入是视频，与音频翻译入口职责冲突）。
     p.add_argument('--enable-visual-diarization', dest='enable_visual_diarization',
@@ -540,6 +798,50 @@ def main():
             else:
                 print(f"上传翻译指南: {guideline_path.name}...")
                 client.upload(guideline_path, task_id=task_id)
+
+    # ── 2b. 编辑重跑预处理 ─────────────────────────────────
+    if args.edit_rerun:
+        if not task_id:
+            print("[错误] 编辑重跑模式需要已有的 task_id，但未找到 .vt_task_id 文件。")
+            print("  编辑重跑模式要求服务端之前已跑过此任务。如需新建任务，去掉 --edit-rerun 参数。")
+            sys.exit(1)
+
+        print("\n--- 编辑重跑预处理 ---")
+
+        # 时间同步检查
+        _check_server_time(client)
+
+        # 验证服务端已有 segments 输出（list_files 检查）
+        first_input = Path(args.inputs[0])
+        dest_dir = _compute_dest_dir(first_input)
+        segments_subdir = f"{dest_dir}/{SEGMENTS_DIRNAME}"
+        try:
+            result = client.list_files(task_id, sub_dir=segments_subdir, since=0)
+            if not result.get("items"):
+                print(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
+                      f"请确认任务 {task_id} 已完成过 ASR 阶段。")
+                sys.exit(1)
+        except Exception as e:
+            print(f"[错误] 无法访问服务端 segments 目录: {e}")
+            sys.exit(1)
+
+        # 检查服务端无正在运行的任务
+        try:
+            running = client.status(task_id, since_line=0)
+            if running.get("status") == "running":
+                print(f"[错误] 任务 {task_id} 正在运行中，请等待完成后再编辑重跑。")
+                sys.exit(1)
+        except Exception:
+            pass  # 查询失败不阻断
+
+        # 解析目标语言
+        from Common.language_map import normalize_target_language_codes
+        target_codes = normalize_target_language_codes(args.targets) if args.targets else []
+
+        # 执行编辑检测和变更
+        _detect_and_apply_edits(client, task_id, input_paths, target_codes)
+
+        print("--- 编辑重跑预处理完成 ---\n")
 
     # ── 3. 远程执行 ─────────────────────────────────────────
     remote_args = _build_remote_args(args)

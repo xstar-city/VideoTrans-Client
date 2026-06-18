@@ -65,6 +65,7 @@ def process_video_pipeline(
     max_video_slowdown_pct: float = 0.1,
     max_video_speedup_pct: float = 0.2,
     enable_visual_diarization: bool = False,
+    edit_rerun: bool = False,
 ):
     """视频翻译主流程：提取音频 → 远程翻译 → 本地视频同步 + 合并音轨。
 
@@ -91,6 +92,17 @@ def process_video_pipeline(
         if not video_path.exists():
             print(f"文件不存在: {video_path}，跳过")
             continue
+
+        # 编辑重跑模式：删除已翻译的目标语言视频，避免被跳过检查跳过
+        if edit_rerun:
+            for code in target_codes:
+                out_video = build_translated_output_path(video_path, video_path, code)
+                if out_video.exists():
+                    try:
+                        out_video.unlink()
+                        print(f"[编辑重跑] 删除已翻译视频: {out_video.name}")
+                    except OSError as e:
+                        print(f"[警告] 无法删除 {out_video.name}: {e}")
 
         # 检查是否所有目标语言的视频都已存在
         if all(
@@ -151,6 +163,9 @@ def process_video_pipeline(
 
         if enable_visual_diarization:
             audio_argv.append("--enable-visual-diarization")
+
+        if edit_rerun:
+            audio_argv.append("--edit-rerun")
 
         print(f"调用 audio_translate.py (server={server_url})...")
         # 临时替换 sys.argv 以直接调用 audio_translate.main()
@@ -222,7 +237,7 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['deepseek-v4-pro', 'gemini-3.1-flash-lite','doubao-seed-2-0-pro']
+DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'deepseek-v4-pro','doubao-seed-2-0-pro']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 → 远程翻译 → 本地视频同步")
@@ -253,6 +268,10 @@ def main():
                         '视觉信号辅助说话人切分（当前为占位开关，服务端实际功能尚未实现）。')
 
     p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
+    p.add_argument('--edit-rerun', action='store_true',
+                   help='编辑重跑模式：检测本地编辑（改ASR/改翻译/删语种/删mp3/删txt），'
+                        '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
+                        '要求服务端已有该任务的运行记录。')
 
     
     args = p.parse_args()
@@ -299,6 +318,7 @@ def main():
             max_video_slowdown_pct=args.max_video_slowdown_pct,
             max_video_speedup_pct=args.max_video_speedup_pct,
             enable_visual_diarization=args.enable_visual_diarization,
+            edit_rerun=args.edit_rerun,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

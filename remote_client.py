@@ -419,6 +419,50 @@ class RemoteScriptClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ─── 服务端时间查询 ──────────────────────────────────────
+
+    def get_server_time(self) -> dict:
+        """获取服务端时间，用于客户端编辑重跑前的时间同步检查。
+
+        返回:
+            {"server_time": float, "timezone": str}
+        """
+        resp = requests.get(
+            f"{self.base_url}/server-time",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 批量删除文件 ──────────────────────────────────────
+
+    def delete_files(self, task_id: str,
+                     files: list[str] | None = None,
+                     dirs: list[str] | None = None) -> dict:
+        """批量删除任务工作目录中的文件/目录。
+
+        参数:
+            task_id: 任务 ID
+            files: 要删除的文件相对路径列表
+            dirs: 要删除的目录相对路径列表
+
+        返回:
+            {"task_id": "...", "deleted_files": [...], "deleted_dirs": [...], "errors": [...]}
+        """
+        body = {
+            "files": files or [],
+            "dirs": dirs or [],
+        }
+        resp = requests.post(
+            f"{self.base_url}/delete/{task_id}",
+            json=body,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ─── 取消任务 ──────────────────────────────────────────
 
     def cancel(self, task_id: str) -> dict:
