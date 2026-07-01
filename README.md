@@ -246,8 +246,10 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--separate` / `--no-separate` | 是否启用人声分离（去背景音）。默认开启；传 `--no-separate` 关闭。 | 启用 |
+| `--detect-nonverbal-and-singing` / `--no-detect-nonverbal-and-singing` | 检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；传 `--no-detect-nonverbal-and-singing` 关闭。 | 启用 |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
+| `--enable-visual-diarization` / `--no-enable-visual-diarization` | 是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭，关闭时本地抽 mp3 上传服务端（带宽友好）；开启时直接上传完整 mp4，由服务端结合人脸跟踪/嘴部运动等视觉信号辅助说话人切分。 | 关闭 |
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
