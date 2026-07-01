@@ -202,11 +202,7 @@ def process_batch(
     denoise: str = "aggressive",
     translation_models: str = "",
     tts_aware_max_retries: int = 3,
-    max_audio_slowdown_pct: float = 0.2,
-    max_audio_speedup_pct: float = 0.3,
     extra_translation_guideline: str | None = None,
-    max_video_slowdown_pct: float = 0.1,
-    max_video_speedup_pct: float = 0.2,
 ) -> None:
     """处理一批视频：提取音频 → 远程翻译 → 本地视频同步+合并。"""
     use_gpu = detect_gpu_available()
@@ -271,10 +267,6 @@ def process_batch(
         if translation_models:
             cmd.extend(["--translation-models", translation_models])
         cmd.extend(["--tts-aware-max-retries", str(tts_aware_max_retries)])
-        cmd.extend(["--max-audio-slowdown-pct", str(max_audio_slowdown_pct)])
-        cmd.extend(["--max-audio-speedup-pct", str(max_audio_speedup_pct)])
-        cmd.extend(["--max-video-slowdown-pct", str(max_video_slowdown_pct)])
-        cmd.extend(["--max-video-speedup-pct", str(max_video_speedup_pct)])
         if extra_translation_guideline:
             cmd.extend(["--extra-translation-guideline", extra_translation_guideline])
 
@@ -362,10 +354,6 @@ def main():
                    help='包含额外翻译指南的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=3,
                    help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
-    p.add_argument('--max-audio-slowdown-pct', type=float, default=0.1, help='允许的最大 TTS 音频加速比例（相对原始时长）')
-    p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
-    p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
-    p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
     p.add_argument('--server', default='localhost',
                    help='服务端 IP 地址 (默认: localhost)')
     args = p.parse_args()
@@ -422,11 +410,7 @@ def main():
             denoise=args.denoise,
             translation_models=args.translation_models,
             tts_aware_max_retries=args.tts_aware_max_retries,
-            max_audio_slowdown_pct=args.max_audio_slowdown_pct,
-            max_audio_speedup_pct=args.max_audio_speedup_pct,
             extra_translation_guideline=args.extra_translation_guideline,
-            max_video_slowdown_pct=args.max_video_slowdown_pct,
-            max_video_speedup_pct=args.max_video_speedup_pct,
         )
 
     batch_elapsed = perf_counter() - batch_start_counter

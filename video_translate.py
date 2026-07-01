@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""开源版视频翻译入口：本地提取音频 → 远程翻译 → 本地视频同步。
+"""开源版视频翻译入口：本地提取音频 → 远程翻译 → 本地视频音轨替换。
 
 与 audio_translate.py 的纯远程调用模式不同，视频翻译采用
 "本地视频操作 + 远程音频翻译" 的混合架构，避免上传大视频文件。
@@ -8,8 +8,7 @@
     video_translate.py
       ├── Step 1: extract_audio_ffmpeg()       # 本地 ffmpeg
       ├── Step 2: subprocess audio_translate.py # 远程调用
-      ├── Step 3: sync_video_to_audio()         # 本地视频同步
-      └── Step 4: mux_audio_into_video()        # 本地 ffmpeg
+      └── Step 3: mux_audio_into_video()        # 本地 ffmpeg（视频画面不做任何伸缩）
 
 依赖：
     - ffmpeg / ffprobe 在 PATH 中可用
@@ -37,7 +36,6 @@ from Common.video_utils import (
     detect_gpu_available,
     extract_audio_ffmpeg,
     mux_audio_into_video,
-    sync_video_to_audio,
 )
 from remote_client import normalize_server_url
 
@@ -59,15 +57,19 @@ def process_video_pipeline(
     translation_models: str = "",
     translation_mode: str = "tts_aware",
     tts_aware_max_retries: int = 3,
-    max_audio_slowdown_pct: float = 0.2,
-    max_audio_speedup_pct: float = 0.3,
+    tts_max_audio_slowdown_pct: float = 0.2,
+    tts_max_audio_speedup_pct: float = 0.2,
+    tts_aware_min_candidate_count: int = 3,
     extra_translation_guideline: str | None = None,
-    max_video_slowdown_pct: float = 0.1,
-    max_video_speedup_pct: float = 0.2,
     enable_visual_diarization: bool = False,
     edit_rerun: bool = False,
 ):
-    """视频翻译主流程：提取音频 → 远程翻译 → 本地视频同步 + 合并音轨。
+    """视频翻译主流程：提取音频 → 远程翻译 → 本地原视频画面 + 新音轨 mux。
+
+    设计约束（"禁止伸缩"简化）：
+        - 视频画面保持原速：不切分、不调速、不重新合并
+        - 背景音轨保持原始时长，TTS 每段已被服务端强制贴合原段时长
+        - 客户端只需把 final.mp3 mux 进原视频即可
 
     上传策略：
         - enable_visual_diarization=False（默认）：本地 ffmpeg 抽 mp3 → 上传 mp3 给服务端，
@@ -78,7 +80,7 @@ def process_video_pipeline(
     use_gpu = detect_gpu_available()
     gpu_status = "GPU 加速" if use_gpu else "CPU 模式"
     upload_mode = "上传视频" if enable_visual_diarization else "上传音频"
-    print(f"\n处理 {len(video_paths)} 个视频文件... ({upload_mode}; 视频同步/合并: {gpu_status})")
+    print(f"\n处理 {len(video_paths)} 个视频文件... ({upload_mode}; 音轨合并: {gpu_status})")
 
     target_codes = normalize_target_language_codes(targets)
 
@@ -154,10 +156,9 @@ def process_video_pipeline(
             audio_argv.extend(["--translation-models", translation_models])
         audio_argv.extend(["--translation-mode", translation_mode])
         audio_argv.extend(["--tts-aware-max-retries", str(tts_aware_max_retries)])
-        audio_argv.extend(["--max-audio-slowdown-pct", str(max_audio_slowdown_pct)])
-        audio_argv.extend(["--max-audio-speedup-pct", str(max_audio_speedup_pct)])
-        audio_argv.extend(["--max-video-slowdown-pct", str(max_video_slowdown_pct)])
-        audio_argv.extend(["--max-video-speedup-pct", str(max_video_speedup_pct)])
+        audio_argv.extend(["--tts-max-audio-slowdown-pct", str(tts_max_audio_slowdown_pct)])
+        audio_argv.extend(["--tts-max-audio-speedup-pct", str(tts_max_audio_speedup_pct)])
+        audio_argv.extend(["--tts-aware-min-candidate-count", str(tts_aware_min_candidate_count)])
         if extra_translation_guideline:
             audio_argv.extend(["--extra-translation-guideline", extra_translation_guideline])
 
@@ -182,8 +183,25 @@ def process_video_pipeline(
         finally:
             sys.argv = original_argv
 
-    # ── Step 3 + 4: 本地视频同步 + 合并音轨 ──────────────────
-    print("\n--- Step 3: 视频同步 + 合并音轨 ---")
+    # ── Step 3: 合并音轨（视频画面保持原速，不做任何切分/调速）──────────
+    print(f"\n--- Step 3: 合并音轨 ---")
+
+    # 合成前同步检查：确保本地文件与服务端一致（所有模式统一执行）
+    # 防止服务端重新生成的文件（如 combined.mp3/final.mp3）未被下载到本地
+    print("合成前文件同步检查...")
+    try:
+        from remote_client import RemoteScriptClient
+        from audio_translate import _sync_files, _compute_dest_dir, _load_task_id
+        sync_client = RemoteScriptClient(server_url)
+        for video_path in video_data:
+            task_id = _load_task_id(video_path)
+            if task_id:
+                dest_dir = _compute_dest_dir(video_path)
+                _sync_files(sync_client, task_id, video_path.parent,
+                           sub_dir=dest_dir, since=0)
+    except Exception as e:
+        print(f"  [警告] 合成前文件同步检查失败: {e}")
+
     for code in target_codes:
         print(f"\n处理语言: {code}")
         for video_path, data in list(video_data.items()):
@@ -204,29 +222,10 @@ def process_video_pipeline(
                     print(f"最终音频未找到 ({video_path.name}, {code})，跳过音轨合并")
                     continue
 
-                # Step 3: 视频同步
-                print(f"  同步视频: {video_path.name} ({code})...")
-                try:
-                    synced_video = sync_video_to_audio(video_path, code)
-                except Exception as e:
-                    print(f"  [错误] 视频同步失败: {e}")
-                    continue
-
-                mux_source_video = synced_video
-
-                # Step 4: 合并音轨
-                out_video = build_translated_output_path(video_path, mux_source_video, code)
-                print(f"  合并音轨: {mux_source_video.name} + {final_audio.name} → {out_video.name}...")
-                mux_audio_into_video(mux_source_video, final_audio, out_video)
+                # 视频不做任何伸缩，直接 mux
+                print(f"  合并音轨: {video_path.name} + {final_audio.name} → {out_video.name}...")
+                mux_audio_into_video(video_path, final_audio, out_video)
                 print(f"  翻译视频已保存: {out_video}")
-
-                # 清理中间文件
-                if mux_source_video != video_path and mux_source_video.exists():
-                    try:
-                        mux_source_video.unlink()
-                        print(f"  已清理中间视频: {mux_source_video.name}")
-                    except OSError as e:
-                        print(f"  [警告] 无法删除中间视频 {mux_source_video.name}: {e}")
 
             except Exception as e:
                 print(f"[错误] 处理 {video_path.name} ({code}) 失败: {e}")
@@ -237,7 +236,8 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'deepseek-v4-pro','doubao-seed-2-0-pro']
+# 'gemini-3.5-flash'
+DEFAULT_MODELS = ['gemini-3.5-flash', 'doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'doubao-seed-2-1-pro', 'gemini-3.5-flash']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 → 远程翻译 → 本地视频同步")
@@ -251,25 +251,28 @@ def main():
                         '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
                         '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='音频降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
+    
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
-    p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
-    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
-    p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=3, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
-    # 视频的伸缩，是音频最后没能伸缩到1，剩下的部分。比如tts合成音频长1.5s，原音频长1s，压缩音频到1.3s后，剩下的0.3s，就是视频的伸缩，画面会变快。
-    p.add_argument('--max-audio-slowdown-pct', type=float, default=0.1, help='允许的最大 TTS 音频加速比例（相对原始时长）')
-    p.add_argument('--max-audio-speedup-pct', type=float, default=0.2, help='允许的最大 TTS 音频减慢比例（相对原始时长）')
-    p.add_argument('--max-video-slowdown-pct', type=float, default=0.1, help='视频片段最大允许减速比例（相对原始时长）')
-    p.add_argument('--max-video-speedup-pct', type=float, default=0.2, help='视频片段最大允许加速比例（相对原始时长）')
     p.add_argument('--enable-visual-diarization', action=argparse.BooleanOptionalAction, default=False,
                    help='是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭。'
                         '关闭时本地抽 mp3 上传服务端（带宽友好）；'
                         '开启时直接上传完整 mp4，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
-                        '视觉信号辅助说话人切分（当前为占位开关，服务端实际功能尚未实现）。')
+                        '视觉信号辅助说话人切分。')
+
+    p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
+    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
+    p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=3, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
+    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
+                   help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
+    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
+                   help='TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: 0.2')
+    p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
+                   help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
 
     p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
     p.add_argument('--edit-rerun', action='store_true',
-                   help='编辑重跑模式：检测本地编辑（改ASR/改翻译/删语种/删mp3/删txt），'
+                   help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
                         '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
                         '要求服务端已有该任务的运行记录。')
 
@@ -312,11 +315,10 @@ def main():
             translation_models=args.translation_models,
             translation_mode=args.translation_mode,
             tts_aware_max_retries=args.tts_aware_max_retries,
-            max_audio_slowdown_pct=args.max_audio_slowdown_pct,
-            max_audio_speedup_pct=args.max_audio_speedup_pct,
+            tts_max_audio_slowdown_pct=args.tts_max_audio_slowdown_pct,
+            tts_max_audio_speedup_pct=args.tts_max_audio_speedup_pct,
+            tts_aware_min_candidate_count=args.tts_aware_min_candidate_count,
             extra_translation_guideline=args.extra_translation_guideline,
-            max_video_slowdown_pct=args.max_video_slowdown_pct,
-            max_video_speedup_pct=args.max_video_speedup_pct,
             enable_visual_diarization=args.enable_visual_diarization,
             edit_rerun=args.edit_rerun,
         )

@@ -4,11 +4,12 @@
 预置最优参数，适合大多数场景：
 - ASR 模式：basic（ASR 自带说话人切分）
 - 翻译模式：independent（无需 TTS 时长感知）
-- 音频变速：禁用（保持原速）
+
+视频画面/背景音轨保持原样（"禁止伸缩"简化架构），无视频变速参数。
 
 使用方式：
-    python video_translate_solo.py "video.mp4" -t en --server <IP>
-    python video_translate_solo.py "a.mp4" "b.mp4" -t en ja --server <IP>
+    python video_translate_basic.py "video.mp4" -t en --server <IP>
+    python video_translate_basic.py "a.mp4" "b.mp4" -t en ja --server <IP>
 
 与 video_translate.py 的区别仅在于默认参数，所有完整参数仍可通过命令行覆盖。
 """
@@ -20,11 +21,12 @@ import sys
 from pathlib import Path
 
 
+from remote_client import normalize_server_url
 from video_translate import process_video_pipeline
 
 
 def main():
-    p = argparse.ArgumentParser(description="基本模式视频翻译（预置最优参数：basic ASR + independent 翻译 + 禁用音频变速）")
+    p = argparse.ArgumentParser(description="基本模式视频翻译（预置最优参数：basic ASR + independent 翻译）")
     # ── 用户常用参数 ──
     p.add_argument("inputs", nargs="+", help="本地视频文件路径")
     p.add_argument("--target", "-t", dest="targets", nargs="+", default=["en"], help="目标语言代码，默认：en")
@@ -73,13 +75,9 @@ def main():
             denoise=args.denoise,
             asr_mode="basic",               # 基本模式使用 ASR 自带说话人切分
             translation_models=args.translation_models,
-            translation_mode="independent",   # 基本模式无需 TTS 时长感知
-            tts_aware_max_retries=0,          # independent 模式不使用
-            max_audio_slowdown_pct=0.0,       # 禁用音频变速
-            max_audio_speedup_pct=0.0,        # 禁用音频变速
+            translation_mode="independent", # 基本模式无需 TTS 时长感知
+            tts_aware_max_retries=0,        # independent 模式不使用
             extra_translation_guideline=args.extra_translation_guideline,
-            max_video_slowdown_pct=0.1,
-            max_video_speedup_pct=0.2,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

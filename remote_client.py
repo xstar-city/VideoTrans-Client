@@ -392,7 +392,7 @@ class RemoteScriptClient:
     # ─── 列出文件 ──────────────────────────────────────────
 
     def list_files(self, task_id: str, sub_dir: str = "",
-                   since: float = 0) -> dict:
+                   since: float = 0, with_hash: bool = False) -> dict:
         """
         列出任务工作目录中的文件
 
@@ -400,15 +400,19 @@ class RemoteScriptClient:
             task_id: 任务 ID
             sub_dir: 子目录路径
             since: 增量过滤，只返回 mtime > since 的文件，0 表示列出全部
+            with_hash: 是否请求服务端返回文件 MD5 哈希（用于内容对比）
 
         返回:
             {"task_id": "...", "path": "...", "items": [...]}
+            with_hash=True 时，文件项包含 "hash" 字段
         """
         params = {}
         if sub_dir:
             params["sub_dir"] = sub_dir
         if since > 0:
             params["since"] = since
+        if with_hash:
+            params["with_hash"] = "true"
 
         resp = requests.get(
             f"{self.base_url}/files/{task_id}",
