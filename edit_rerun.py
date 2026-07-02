@@ -1,9 +1,10 @@
 """编辑重跑模式：检测本地对 segments/ 的编辑并同步到服务端。
 
-启动后，客户端逐一对比本地与服务端的文件内容/存在性，检测以下六种编辑后自动处理：
+启动后，客户端逐一对比本地与服务端的文件内容/存在性，检测以下编辑后自动处理：
 
 术语：
   - ASR 文本：segments/ASR/{stem}.txt（原声音频的语音识别结果）
+    格式：第一行=ASR 文本，第二行=音频时长秒数（三位小数）
   - 翻译文本：segments/{lang}/{stem}.txt（ASR 文本翻译到目标语言后的文本）
   - 原声音频 mp3：segments/{stem}.mp3（按句切分的原始音频片段，本场景不涉及编辑）
   - 合成音频 mp3：segments/{lang}/{stem}.mp3（基于翻译文本 TTS 合成的目标语言音频）
@@ -12,6 +13,8 @@
 | 场景            | 操作方式                              | 客户端检测                          | 自动执行                                                              |
 | --------------- | ------------------------------------ | ----------------------------------- | -------------------------------------------------------------------- |
 | 改 ASR 文本     | 编辑 segments/ASR/{stem}.txt          | 下载服务端 ASR 文本逐字对比，内容不一致 | 上传新 ASR 文本；删除所有语言目录下同 stem 的 翻译文本 + 合成音频 mp3 + 翻译候选 md |
+|                  |                                      |                                     | 若时长行（第二行）也变更：额外删除 segments/{stem}.mp3 + 各语言目录下 {stem}.mp3，服务端重新切分 |
+| 新增 ASR 文本   | 在 segments/ASR/ 下新建 {stem}.txt    | 客户端有但服务端没有                 | 校验两行格式 + 时长 > 0.3s → 上传 txt；服务端自动从人声音频切分 mp3   |
 | 改翻译文本      | 编辑 segments/{lang}/{stem}.txt       | 下载服务端翻译文本逐字对比，内容不一致   | 上传新翻译文本；删除该语言目录下同 stem 的 合成音频 mp3 + 翻译候选 md            |
 | 替换合成音频    | 用候选/外部音频替换 segments/{lang}/{stem}.mp3 | 对比本地与服务端文件大小，大小不一致 | 上传新 MP3；删除 combined.mp3 + final.mp3 触发重新合成                    |
 | 删语种         | 删除本地语言目录（如 English/）         | 本地目录不存在                       | 删除服务端对应语言目录                                                  |
@@ -20,6 +23,11 @@
 
 处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差合并），直接从翻译步骤开始，
 仅重跑受影响的部分。
+
+新增/修改 ASR 文本时，服务端会在翻译前执行「音频修复」步骤：
+扫描 ASR txt 对应的 mp3，缺失则从人声音频切分（含响度兜底），并更新 final-asr-result.json。
+时长变更的检测和旧 mp3 删除由客户端负责（对比本地与服务端 txt 的第二行时长，
+服务端旧 txt 可能没有第二行，此时只要客户端有时长行就视为变更）。
 """
 
 from __future__ import annotations
@@ -133,6 +141,66 @@ def _print_txt_diff(local_content: str, server_content: str, label: str):
             print(f"    {line}")
 
 
+def _parse_duration_line(content: str) -> float | None:
+    """从 ASR txt 内容中解析第二行的音频时长（秒）。
+
+    txt 格式：第一行=ASR 文本，第二行=音频时长秒数（三位小数）。
+    旧格式 txt（仅一行文本）返回 None。
+    """
+    lines = content.splitlines()
+    if len(lines) < 2:
+        return None
+    try:
+        return float(lines[1].strip())
+    except (ValueError, IndexError):
+        return None
+
+
+def _validate_asr_txt_for_new_segment(txt_path: Path) -> tuple[str, float] | None:
+    """校验新增 ASR txt 文件是否符合要求。
+
+    要求：
+    - 必须两行（第一行=文本，第二行=时长秒数）
+    - 第二行能解析为 float 且 > 0.3
+    - 文件名（stem）能解析为起始秒数
+
+    Returns:
+        (stem, duration_s) 校验通过；None 校验失败（已打印错误信息）
+    """
+    name = txt_path.name
+    stem = txt_path.stem
+    try:
+        start_s = float(stem)
+    except ValueError:
+        print(f"  [错误] 新增 ASR txt 文件名 '{name}' 不是有效的秒数")
+        return None
+
+    content = txt_path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    if len(lines) < 2:
+        print(f"  [错误] 新增 ASR txt '{name}' 必须两行（第一行文本，第二行时长秒数），"
+              f"当前仅 {len(lines)} 行")
+        return None
+
+    text = lines[0].strip()
+    if not text:
+        print(f"  [错误] 新增 ASR txt '{name}' 第一行文本为空")
+        return None
+
+    try:
+        duration_s = float(lines[1].strip())
+    except ValueError:
+        print(f"  [错误] 新增 ASR txt '{name}' 第二行时长不是有效数字: '{lines[1]}'")
+        return None
+
+    if duration_s <= 0.3:
+        print(f"  [错误] 新增 ASR txt '{name}' 第二行时长 {duration_s:.3f}s ≤ 0.3s，"
+              f"时长过短不允许新增")
+        return None
+
+    return (stem, duration_s)
+
+
 def _detect_and_apply_edits(
     client: RemoteScriptClient,
     task_id: str,
@@ -142,13 +210,15 @@ def _detect_and_apply_edits(
 ):
     """编辑重跑预处理：检测本地编辑 → 上传修改 → 删除下游产物。
 
-    六种检测场景：
+    检测场景：
     1. 改 ASR 文本：内容不一致 → 上传 ASR 文本 + 删除所有语言目录下对应 翻译文本/合成音频 mp3/翻译候选 md
-    2. 改翻译文本：内容不一致 → 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md
-    3. 替换合成音频：文件大小不一致 → 上传新 MP3 + 删除 combined.mp3/final.mp3 触发重新合成
-    4. 删语种：本地语言目录不存在 → 删除服务端对应目录
-    5. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应合成音频 mp3
-    6. 删某句翻译文本：本地翻译文本缺失 → 删除服务端对应 翻译文本+合成音频 mp3+翻译候选 md+候选目录
+       - 若时长行（第二行）也变更 → 额外删除 segments/{stem}.mp3，服务端重新切分
+    2. 新增 ASR txt：客户端有但服务端没有 → 校验两行格式 + 时长 > 0.3s → 上传（服务端自动切分 mp3）
+    3. 改翻译文本：内容不一致 → 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md
+    4. 替换合成音频：文件大小不一致 → 上传新 MP3 + 删除 combined.mp3/final.mp3 触发重新合成
+    5. 删语种：本地语言目录不存在 → 删除服务端对应目录
+    6. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应合成音频 mp3
+    7. 删某句翻译文本：本地翻译文本缺失 → 删除服务端对应 翻译文本+合成音频 mp3+翻译候选 md+候选目录
 
     Args:
         client: 远程脚本客户端
@@ -198,6 +268,8 @@ def _detect_and_apply_edits(
         # ── 场景 1：检测 ASR 文本内容修改 ──
         local_asr_dir = local_segments_dir / ASR_DIRNAME
         changed_asr_stems: set[str] = set()
+        # 时长变更的 stem：需额外删除服务端旧 mp3，触发服务端重新切分
+        duration_changed_stems: set[str] = set()
 
         if local_asr_dir.exists():
             for asr_txt_name in server_asr_txts:
@@ -217,6 +289,28 @@ def _detect_and_apply_edits(
                     print(f"  [改ASR文本] {asr_txt_name} 内容已修改")
                     _print_txt_diff(local_content, server_content, f"ASR/{asr_txt_name}")
 
+                    # 检查时长行（第二行）是否变更 → 需删除旧 mp3 重新切分
+                    # 服务端旧 txt 可能没有第二行（旧格式），此时 server_duration=None，
+                    # 只要客户端有时长行就视为变更
+                    local_duration = _parse_duration_line(local_content)
+                    server_duration = _parse_duration_line(server_content)
+                    if local_duration is not None:
+                        if server_duration is None:
+                            duration_changed_stems.add(stem)
+                            print(f"    └ 时长新增: 无 → {local_duration:.3f}s，将删除旧 mp3 重新切分")
+                        elif abs(local_duration - server_duration) > 0.001:
+                            duration_changed_stems.add(stem)
+                            print(f"    └ 时长变更: {server_duration:.3f}s → {local_duration:.3f}s，将删除旧 mp3 重新切分")
+
+        # 时长变更的 segment：删除服务端 segments/ 下的旧 mp3（服务端修复步骤会重新切分）
+        # 同时删除翻译目录下对应的 mp3（参考音频长度改变，旧 TTS 产物需重新合成）
+        for stem in duration_changed_stems:
+            delete_files.append(f"{server_segments_subdir}/{stem}.mp3")
+            for code in target_codes:
+                lang_dir_name = get_language_dir_name(code)
+                server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+                delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+
         if changed_asr_stems:
             # 对每个语言目录，收集需要删除的文件
             for code in target_codes:
@@ -227,6 +321,28 @@ def _detect_and_apply_edits(
                     delete_files.append(f"{server_lang_subdir}/{stem}.txt")
                     delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
                     delete_files.append(f"{server_lang_subdir}/{stem}.md")
+
+        # ── 场景 7：检测新增 ASR txt（客户端有但服务端没有）──
+        # 用户手动拆句：修改原 txt 的文本和时长 + 新增一个 txt
+        # 校验：txt 必须两行，第二行时长 > 0.3s
+        # 上传 txt 后，服务端修复步骤会从人声音频切分对应 mp3
+        if local_asr_dir.exists():
+            local_asr_txt_names = {
+                f.name for f in local_asr_dir.glob('*.txt')
+                if f.name not in _ASR_NON_TXT_FILES
+            }
+            new_asr_txts = local_asr_txt_names - server_asr_txts
+            for new_txt_name in sorted(new_asr_txts):
+                local_txt = local_asr_dir / new_txt_name
+                result = _validate_asr_txt_for_new_segment(local_txt)
+                if result is None:
+                    # 校验失败 → 中断，不允许继续
+                    print(f"  [错误] 新增 ASR txt 校验失败，请修正后重试: {new_txt_name}")
+                    sys.exit(1)
+                stem, duration_s = result
+                remote_asr_path = f"{server_asr_subdir}/{new_txt_name}"
+                upload_list.append((local_txt, remote_asr_path))
+                print(f"  [新增ASR文本] {new_txt_name}（时长 {duration_s:.3f}s）→ 服务端将自动切分 mp3")
 
         # ── 场景 2-5：检测各语言目录的编辑 ──
         for code in target_codes:
