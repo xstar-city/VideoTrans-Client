@@ -269,6 +269,18 @@ def _cleanup_stale_sync_files(local_dir: Path, server_names: set[str]) -> int:
     return removed
 
 
+def _compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
+    """计算文件的 MD5 哈希值，用于内容对比。"""
+    md5 = hashlib.md5()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            md5.update(chunk)
+    return md5.hexdigest()
+
+
 def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 sub_dir: str = "", since: float = 0,
                 cleanup_stale: bool = False) -> float:
@@ -277,7 +289,7 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
     cleanup_stale=True 时，同步完成后删除本地过时文件
     （服务端已不存在的 .mp3/.txt/.srt，如 VAD 裁剪改名后的旧文件）。
     """
-    result = client.list_files(task_id, sub_dir=sub_dir, since=since)
+    result = client.list_files(task_id, sub_dir=sub_dir, since=since, with_hash=True)
     latest_mtime = since
 
     # 记录服务端可见条目名，用于清理本地孤儿文件
@@ -303,19 +315,27 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
             if sub_latest > latest_mtime:
                 latest_mtime = sub_latest
         else:
-            # 下载文件（size + mtime 都匹配则跳过，避免重复下载）
+            # 下载文件（size + mtime + hash 三级对比，避免重复下载）
+            # 对比优先级：size → mtime → hash
             # mtime 检查：服务端重新生成文件后（如 edit-rerun 触发 TTS 重合成），
-            # 即使 size 不变也能检测到并重新下载。依赖客户端与服务端时间同步。
+            # 即使 size 不变也能检测到并重新下载。但 mtime 受客户端/服务端时间差影响，
+            # 可能误判 → hash 兜底：size 相同且 hash 相同则跳过，无论 mtime 如何。
             local_file = local_dir / name
             remote_path = f"{sub_dir}/{name}" if sub_dir else name
             remote_size = item.get("size", -1)
             remote_mtime = item.get("mtime", 0)
+            remote_hash = item.get("hash")
             if local_file.exists() and remote_size >= 0:
                 try:
                     local_stat = local_file.stat()
                     if local_stat.st_size == remote_size:
-                        # size 匹配，再检查 mtime：服务端文件是否比本地新
+                        # size 匹配，检查 mtime
                         if remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
+                            # mtime 提示服务端文件更新，但可能是时间波动 → hash 兜底
+                            if remote_hash:
+                                local_hash = _compute_file_hash(local_file)
+                                if local_hash == remote_hash:
+                                    continue  # hash 相同，内容未变，跳过
                             print(f"  [更新] {remote_path} (服务端文件已更新，重新下载)")
                         else:
                             continue  # size 和 mtime 都匹配，跳过
@@ -345,7 +365,7 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
     """
     missing = []
     try:
-        result = client.list_files(task_id, sub_dir=sub_dir, since=0)
+        result = client.list_files(task_id, sub_dir=sub_dir, since=0, with_hash=True)
     except Exception:
         # 无法连接服务端时，无法验证，返回空列表
         return missing
@@ -365,6 +385,7 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
             remote_path = f"{sub_dir}/{name}" if sub_dir else name
             remote_size = item.get("size", -1)
             remote_mtime = item.get("mtime", 0)
+            remote_hash = item.get("hash")
             if not local_file.exists():
                 missing.append(remote_path)
             elif remote_size >= 0:
@@ -373,7 +394,11 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
                     if local_stat.st_size != remote_size:
                         missing.append(f"{remote_path} (大小不匹配: 本地{local_stat.st_size} vs 服务端{remote_size})")
                     elif remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
-                        # size 匹配但服务端文件更新（如 edit-rerun 后重生成）
+                        # size 匹配但 mtime 不同，可能是时间波动 → hash 兜底
+                        if remote_hash:
+                            local_hash = _compute_file_hash(local_file)
+                            if local_hash == remote_hash:
+                                continue  # hash 相同，内容未变，不算缺失
                         missing.append(f"{remote_path} (服务端文件已更新: mtime {remote_mtime:.0f} > 本地 {local_stat.st_mtime:.0f})")
                 except OSError:
                     missing.append(remote_path)

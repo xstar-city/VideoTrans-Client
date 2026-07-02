@@ -18,7 +18,7 @@
 | 改翻译文本      | 编辑 segments/{lang}/{stem}.txt       | 下载服务端翻译文本逐字对比，内容不一致   | 上传新翻译文本；删除该语言目录下同 stem 的 合成音频 mp3 + 翻译候选 md            |
 | 替换合成音频    | 用候选/外部音频替换 segments/{lang}/{stem}.mp3 | 对比本地与服务端文件大小，大小不一致 | 上传新 MP3；删除 combined.mp3 + final.mp3 触发重新合成                    |
 | 删语种         | 删除本地语言目录（如 English/）         | 本地目录不存在                       | 删除服务端对应语言目录                                                  |
-| 删某句合成音频  | 删除 segments/{lang}/{stem}.mp3       | 本地合成音频 mp3 缺失                | 删除服务端对应合成音频 mp3                                              |
+| 删某句合成音频  | 删除 segments/{lang}/{stem}.mp3       | 本地合成音频 mp3 缺失                | 删除服务端对应合成音频 mp3 + 翻译候选 md + 候选目录                      |
 | 删某句翻译文本  | 删除 segments/{lang}/{stem}.txt       | 本地翻译文本缺失                     | 删除服务端对应翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录              |
 
 处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差合并），直接从翻译步骤开始，
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -217,7 +218,7 @@ def _detect_and_apply_edits(
     3. 改翻译文本：内容不一致 → 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md
     4. 替换合成音频：文件大小不一致 → 上传新 MP3 + 删除 combined.mp3/final.mp3 触发重新合成
     5. 删语种：本地语言目录不存在 → 删除服务端对应目录
-    6. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应合成音频 mp3
+    6. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应 合成音频 mp3/翻译候选 md/候选目录
     7. 删某句翻译文本：本地翻译文本缺失 → 删除服务端对应 翻译文本+合成音频 mp3+翻译候选 md+候选目录
 
     Args:
@@ -375,15 +376,34 @@ def _detect_and_apply_edits(
                     ext = server_file.rsplit(".", 1)[1] if "." in server_file else ""
 
                     if ext == "mp3":
-                        # 场景 4：删某句合成音频
+                        # 场景 4：删某句合成音频 → 删除 合成音频 mp3 + 翻译候选 md + 候选目录
                         delete_files.append(f"{server_lang_subdir}/{server_file}")
-                        print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除")
+                        delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                        delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                        # 同步删除客户端本地的候选 md 和候选目录，避免后续混乱
+                        _local_candidate_md = local_lang_dir / f"{stem}.md"
+                        if _local_candidate_md.exists():
+                            _local_candidate_md.unlink()
+                        _local_candidate_dir = local_lang_dir / stem
+                        if _local_candidate_dir.is_dir():
+                            shutil.rmtree(_local_candidate_dir, ignore_errors=True)
+                        print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除 → 删除合成音频+翻译候选+候选目录")
                     elif ext == "txt":
                         # 场景 5：删某句翻译文本 → 删除 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录
                         delete_files.append(f"{server_lang_subdir}/{stem}.txt")
                         delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
                         delete_files.append(f"{server_lang_subdir}/{stem}.md")
                         delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                        # 同步删除客户端本地的合成音频 mp3、候选 md 和候选目录
+                        _local_mp3 = local_lang_dir / f"{stem}.mp3"
+                        if _local_mp3.exists():
+                            _local_mp3.unlink()
+                        _local_candidate_md = local_lang_dir / f"{stem}.md"
+                        if _local_candidate_md.exists():
+                            _local_candidate_md.unlink()
+                        _local_candidate_dir = local_lang_dir / stem
+                        if _local_candidate_dir.is_dir():
+                            shutil.rmtree(_local_candidate_dir, ignore_errors=True)
                         print(f"  [删翻译文本] {lang_dir_name}/{server_file} 本地已删除 → 删除翻译文本+合成音频+翻译候选")
 
             # 场景 2：检测翻译文本内容修改
