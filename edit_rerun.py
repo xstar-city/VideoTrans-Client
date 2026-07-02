@@ -12,10 +12,10 @@
 
 | 场景            | 操作方式                              | 客户端检测                          | 自动执行                                                              |
 | --------------- | ------------------------------------ | ----------------------------------- | -------------------------------------------------------------------- |
-| 改 ASR 文本     | 编辑 segments/ASR/{stem}.txt          | 下载服务端 ASR 文本逐字对比，内容不一致 | 上传新 ASR 文本；删除所有语言目录下同 stem 的 翻译文本 + 合成音频 mp3 + 翻译候选 md |
-|                  |                                      |                                     | 若时长行（第二行）也变更：额外删除 segments/{stem}.mp3 + 各语言目录下 {stem}.mp3，服务端重新切分 |
+| 改 ASR 文本     | 编辑 segments/ASR/{stem}.txt          | 下载服务端 ASR 文本逐字对比，内容不一致 | 上传新 ASR 文本；删除所有语言目录下同 stem 的 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录 |
+|                  |                                      |                                     | 若时长行（第二行）也变更：额外删除 segments/{stem}.mp3 + 各语言目录下 {stem}.mp3 + md + 候选目录，服务端重新切分 |
 | 新增 ASR 文本   | 在 segments/ASR/ 下新建 {stem}.txt    | 客户端有但服务端没有                 | 校验两行格式 + 时长 > 0.3s → 上传 txt；服务端自动从人声音频切分 mp3   |
-| 改翻译文本      | 编辑 segments/{lang}/{stem}.txt       | 下载服务端翻译文本逐字对比，内容不一致   | 上传新翻译文本；删除该语言目录下同 stem 的 合成音频 mp3 + 翻译候选 md            |
+| 改翻译文本      | 编辑 segments/{lang}/{stem}.txt       | 下载服务端翻译文本逐字对比，内容不一致   | 上传新翻译文本；删除该语言目录下同 stem 的 合成音频 mp3 + 翻译候选 md + 候选目录  |
 | 替换合成音频    | 用候选/外部音频替换 segments/{lang}/{stem}.mp3 | 对比本地与服务端文件大小，大小不一致 | 上传新 MP3；删除 combined.mp3 + final.mp3 触发重新合成                    |
 | 删语种         | 删除本地语言目录（如 English/）         | 本地目录不存在                       | 删除服务端对应语言目录                                                  |
 | 删某句合成音频  | 删除 segments/{lang}/{stem}.mp3       | 本地合成音频 mp3 缺失                | 删除服务端对应合成音频 mp3 + 翻译候选 md + 候选目录                      |
@@ -74,6 +74,20 @@ def _compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
                 break
             md5.update(chunk)
     return md5.hexdigest()
+
+
+def _delete_local_tts_artifacts(local_lang_dir: Path, stem: str):
+    """删除客户端本地语言目录下指定 stem 的 TTS 产物（mp3 + md + 候选目录）。
+
+    用于编辑重跑时同步清理客户端本地文件，避免后续同步混乱。
+    """
+    for ext in ('.mp3', '.md'):
+        f = local_lang_dir / f"{stem}{ext}"
+        if f.exists():
+            f.unlink()
+    candidate_dir = local_lang_dir / stem
+    if candidate_dir.is_dir():
+        shutil.rmtree(candidate_dir, ignore_errors=True)
 
 
 def _check_server_time(client: RemoteScriptClient):
@@ -212,14 +226,16 @@ def _detect_and_apply_edits(
     """编辑重跑预处理：检测本地编辑 → 上传修改 → 删除下游产物。
 
     检测场景：
-    1. 改 ASR 文本：内容不一致 → 上传 ASR 文本 + 删除所有语言目录下对应 翻译文本/合成音频 mp3/翻译候选 md
-       - 若时长行（第二行）也变更 → 额外删除 segments/{stem}.mp3，服务端重新切分
+    1. 改 ASR 文本：内容不一致 → 上传 ASR 文本 + 删除所有语言目录下对应 翻译文本/合成音频 mp3/翻译候选 md/候选目录
+       - 若时长行（第二行）也变更 → 额外删除 segments/{stem}.mp3 + 各语言目录下 mp3/md/候选目录，服务端重新切分
     2. 新增 ASR txt：客户端有但服务端没有 → 校验两行格式 + 时长 > 0.3s → 上传（服务端自动切分 mp3）
-    3. 改翻译文本：内容不一致 → 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md
+    3. 改翻译文本：内容不一致 → 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md/候选目录
     4. 替换合成音频：文件大小不一致 → 上传新 MP3 + 删除 combined.mp3/final.mp3 触发重新合成
     5. 删语种：本地语言目录不存在 → 删除服务端对应目录
     6. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应 合成音频 mp3/翻译候选 md/候选目录
     7. 删某句翻译文本：本地翻译文本缺失 → 删除服务端对应 翻译文本+合成音频 mp3+翻译候选 md+候选目录
+
+    所有删除操作同时清理服务端和客户端本地文件，避免后续同步混乱。
 
     Args:
         client: 远程脚本客户端
@@ -307,21 +323,38 @@ def _detect_and_apply_edits(
         # 同时删除翻译目录下对应的 mp3（参考音频长度改变，旧 TTS 产物需重新合成）
         for stem in duration_changed_stems:
             delete_files.append(f"{server_segments_subdir}/{stem}.mp3")
+            # 同步删除客户端本地的原声音频 mp3
+            _local_seg_mp3 = local_segments_dir / f"{stem}.mp3"
+            if _local_seg_mp3.exists():
+                _local_seg_mp3.unlink()
             for code in target_codes:
                 lang_dir_name = get_language_dir_name(code)
                 server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+                local_lang_dir = local_segments_dir / lang_dir_name
+                # 服务端：删除 mp3 + md + 候选目录
                 delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                # 客户端：同步删除 TTS 产物
+                _delete_local_tts_artifacts(local_lang_dir, stem)
 
         if changed_asr_stems:
             # 对每个语言目录，收集需要删除的文件
             for code in target_codes:
                 lang_dir_name = get_language_dir_name(code)
                 server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+                local_lang_dir = local_segments_dir / lang_dir_name
                 for stem in changed_asr_stems:
-                    # 删除翻译文本 + 合成音频 mp3 + 翻译候选 md
+                    # 服务端：删除翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录
                     delete_files.append(f"{server_lang_subdir}/{stem}.txt")
                     delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
                     delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                    delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                    # 客户端：同步删除翻译文本 + TTS 产物
+                    _local_txt = local_lang_dir / f"{stem}.txt"
+                    if _local_txt.exists():
+                        _local_txt.unlink()
+                    _delete_local_tts_artifacts(local_lang_dir, stem)
 
         # ── 场景 7：检测新增 ASR txt（客户端有但服务端没有）──
         # 用户手动拆句：修改原 txt 的文本和时长 + 新增一个 txt
@@ -380,13 +413,7 @@ def _detect_and_apply_edits(
                         delete_files.append(f"{server_lang_subdir}/{server_file}")
                         delete_files.append(f"{server_lang_subdir}/{stem}.md")
                         delete_dirs.append(f"{server_lang_subdir}/{stem}")
-                        # 同步删除客户端本地的候选 md 和候选目录，避免后续混乱
-                        _local_candidate_md = local_lang_dir / f"{stem}.md"
-                        if _local_candidate_md.exists():
-                            _local_candidate_md.unlink()
-                        _local_candidate_dir = local_lang_dir / stem
-                        if _local_candidate_dir.is_dir():
-                            shutil.rmtree(_local_candidate_dir, ignore_errors=True)
+                        _delete_local_tts_artifacts(local_lang_dir, stem)
                         print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除 → 删除合成音频+翻译候选+候选目录")
                     elif ext == "txt":
                         # 场景 5：删某句翻译文本 → 删除 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录
@@ -394,16 +421,7 @@ def _detect_and_apply_edits(
                         delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
                         delete_files.append(f"{server_lang_subdir}/{stem}.md")
                         delete_dirs.append(f"{server_lang_subdir}/{stem}")
-                        # 同步删除客户端本地的合成音频 mp3、候选 md 和候选目录
-                        _local_mp3 = local_lang_dir / f"{stem}.mp3"
-                        if _local_mp3.exists():
-                            _local_mp3.unlink()
-                        _local_candidate_md = local_lang_dir / f"{stem}.md"
-                        if _local_candidate_md.exists():
-                            _local_candidate_md.unlink()
-                        _local_candidate_dir = local_lang_dir / stem
-                        if _local_candidate_dir.is_dir():
-                            shutil.rmtree(_local_candidate_dir, ignore_errors=True)
+                        _delete_local_tts_artifacts(local_lang_dir, stem)
                         print(f"  [删翻译文本] {lang_dir_name}/{server_file} 本地已删除 → 删除翻译文本+合成音频+翻译候选")
 
             # 场景 2：检测翻译文本内容修改
@@ -427,10 +445,13 @@ def _detect_and_apply_edits(
                 local_content = local_file.read_text(encoding="utf-8")
 
                 if server_content is not None and server_content != local_content:
-                    # 改翻译文本 → 上传 + 删除对应 合成音频 mp3 + 翻译候选 md
+                    # 改翻译文本 → 上传 + 删除对应 合成音频 mp3 + 翻译候选 md + 候选目录
                     upload_list.append((local_file, server_txt_path))
                     delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
                     delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                    delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                    # 客户端：同步删除 TTS 产物
+                    _delete_local_tts_artifacts(local_lang_dir, stem)
                     print(f"  [改翻译文本] {lang_dir_name}/{local_file.name} 内容已修改")
                     _print_txt_diff(local_content, server_content, f"{lang_dir_name}/{local_file.name}")
 
@@ -472,6 +493,11 @@ def _detect_and_apply_edits(
                 upload_list.append((local_file, remote_mp3_path))
                 delete_files.append(f"{server_lang_subdir}/{COMBINED_AUDIO_FILENAME}")
                 delete_files.append(f"{server_lang_subdir}/{FINAL_AUDIO_FILENAME}")
+                # 客户端：同步删除 combined/final
+                for _fname in (COMBINED_AUDIO_FILENAME, FINAL_AUDIO_FILENAME):
+                    _local_f = local_lang_dir / _fname
+                    if _local_f.exists():
+                        _local_f.unlink()
                 print(f"  [替换合成音频] {lang_dir_name}/{local_file.name} {diff_reason}")
 
     # ── 执行上传 ──
