@@ -92,7 +92,7 @@ python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server <ServerI
 │   └── ...
 ├── 1_translated_en.mp4         ← 英文翻译视频
 └── segments/                   ← 所有中间文件
-    ├── ASR/                    ← 语音识别结果
+    ├── ASR/                    ← 语音识别结果（逐段 txt：第一行=ASR文本，第二行=音频时长秒数）
     └── English/                ← 英文翻译中间文件
         ├── 0.000.txt          ← 逐段翻译文本
         ├── 0.000.mp3          ← 逐段合成音频
