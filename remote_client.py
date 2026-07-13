@@ -20,6 +20,7 @@
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -28,13 +29,21 @@ def normalize_server_url(server: str, port: int = 8000) -> str:
     """将用户输入的服务端地址规范化为完整 URL。
 
     支持的输入形式：
-      - "1.2.3.4"       → "http://1.2.3.4:8000"
-      - "my-server"     → "http://my-server:8000"
-      - "http://..."    → 原样返回（向后兼容）
-      - "https://..."   → 原样返回（向后兼容）
+      - "1.2.3.4"              → "http://1.2.3.4:8000"
+      - "my-server"            → "http://my-server:8000"
+      - "http://1.2.3.4/"      → "http://1.2.3.4:8000"
+      - "http://1.2.3.4:9000/" → "http://1.2.3.4:9000"
+      - "https://example.com"  → "https://example.com:8000"
     """
     if server.startswith("http://") or server.startswith("https://"):
-        return server
+        parsed = urlparse(server)
+        host = parsed.hostname
+        if not host:
+            # URL 解析失败，回退为原样返回
+            return server
+        parsed_port = parsed.port
+        final_port = parsed_port if parsed_port else port
+        return f"{parsed.scheme}://{host}:{final_port}"
     return f"http://{server}:{port}"
 
 

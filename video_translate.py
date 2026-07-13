@@ -253,7 +253,7 @@ def main():
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='音频降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
     
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
-    p.add_argument('--enable-visual-diarization', action=argparse.BooleanOptionalAction, default=False,
+    p.add_argument('--enable-visual-diarization', '-v', action=argparse.BooleanOptionalAction, default=False,
                    help='是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭。'
                         '关闭时本地抽 mp3 上传服务端（带宽友好）；'
                         '开启时直接上传完整 mp4，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
@@ -270,8 +270,8 @@ def main():
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
                    help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
 
-    p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
-    p.add_argument('--edit-rerun', action='store_true',
+    p.add_argument('--server', default='localhost', help='服务端地址，支持 IP、域名或完整 URL（如 117.50.47.18 / http://117.50.47.18/ ）。默认: localhost')
+    p.add_argument('--edit-rerun', '-e', action='store_true',
                    help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
                         '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
                         '要求服务端已有该任务的运行记录。')
