@@ -43,7 +43,7 @@ python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server <ServerIP>
 
 xStar 是目前市面上**唯一**能同时解决以下难题的方案：
 
-- **重叠说话翻译**：多人同时说话翻译成其他语言，对齐各自音频和音色
+- **重叠说话翻译**：多人同时说话翻译成其他语言，对齐各自音频和音色（目前支持2人，可识别绝大部分短重叠）
 - **短声纹识别（< 2s）**：声学特征在极短时间内提取的嵌入向量不够稳健是行业难题，xStar 通过专属多模态模型精准定位说话人身份，避免配音人错误
 - **歌唱（非音乐）重叠对话翻译**：背景音乐和人声的分离相对容易，但**唱歌的人声与正常说话重叠**时难度较大——歌声和语音同属人声频段，传统分离模型无法区分"有人在说话"和"有人在唱歌"，导致歌声被误当作对话送入 ASR，产生乱码翻译并错误配音。
 
@@ -101,7 +101,9 @@ python short_drama_translate.py "E:\短剧\《逐玉》" -t en --server <ServerI
         │   ├── 2.mp3
         │   └── candidates.md  ← 候选文本、音色相似度、时长信息
         ├── combined.mp3       ← 合并后的完整人声
-        └── final.mp3          ← 最终输出音轨
+        ├── final.mp3          ← 最终输出音轨
+        ├── full_translation.srt ← 完整翻译字幕（翻译完成后自动生成）
+        └── translation_guidelines.txt ← 翻译指南（翻译风格/术语要求，可编辑后重跑）
 ```
 
 `segments/` 目录下包含 ASR 识别文本、逐段翻译文本、合成音频和可下载候选音频等丰富的中间文件，可用于校对和二次编辑。完整结构说明见 [输出文件结构说明.md](输出文件结构说明.md)。
@@ -257,6 +259,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--tts-max-audio-slowdown-pct` | TTS 合成音频最大减速百分比（合成短于参考时 librosa 拉伸放慢的上限） | 0.2 |
 | `--tts-max-audio-speedup-pct` | TTS 合成音频最大加速百分比（合成长于参考时 librosa 拉伸加快的上限） | 0.2 |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量（1-10，服务端自动限制范围） | 3 |
+| `--stop-after-translation` | 翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。翻译完成后始终生成 `full_translation.srt` 字幕文件（无论是否启用此参数）。核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。 | 关闭 |
 
 #### 翻译模型列表（`--translation-models`）
 
@@ -356,6 +359,8 @@ python audio_translate.py "1.mp3" -t en hi --server <ServerIP> --edit-rerun
 | 翻译文本 | `segments/{lang}/{stem}.txt` | ASR 文本翻译到目标语言后的文本 |
 | 合成音频 mp3 | `segments/{lang}/{stem}.mp3` | 基于翻译文本 TTS 合成的目标语言音频 |
 | 翻译候选 md | `segments/{lang}/{stem}.md` | 翻译过程中保存的候选/调试信息 |
+| 翻译字幕 | `segments/{lang}/full_translation.srt` | 完整翻译字幕文件（`--stop-after-translation` 模式生成，可人工编辑后 `--edit-rerun` 回写 txt） |
+| 翻译指南 | `segments/{lang}/translation_guidelines.txt` | 翻译指南文件（修改后 `--edit-rerun` 会删除所有翻译产物强制重新翻译） |
 
 | 场景 | 操作方式 | 客户端检测 | 自动执行 |
 |------|----------|-----------|---------|
@@ -367,6 +372,8 @@ python audio_translate.py "1.mp3" -t en hi --server <ServerIP> --edit-rerun
 | **删语种** | 删除本地语言目录（如 `English/`） | 本地目录不存在 | 删除服务端对应语言目录 |
 | **删某句合成音频** | 删除 `segments/{lang}/{stem}.mp3` | 本地合成音频 mp3 缺失 | 删除服务端对应 合成音频 mp3 + 翻译候选 md + 候选目录 |
 | **删某句翻译文本** | 删除 `segments/{lang}/{stem}.txt` | 本地翻译文本缺失 | 删除服务端对应 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录 |
+| **改翻译字幕** | 编辑 `segments/{lang}/full_translation.srt` | 下载服务端 SRT 对比，内容不一致 | 上传 SRT；解析 SRT 将文本写回对应 txt 并上传；**逐句比对文本，仅文本有变更的句子才删除对应 TTS 产物**；删除 combined/final；忽略 txt 的独立修改 |
+| **改翻译指南** | 编辑 `segments/{lang}/translation_guidelines.txt` | 下载服务端指南对比，内容不一致 | 上传新指南；删除该语言目录下所有翻译 txt + TTS 产物 + combined/final，强制重新翻译 |
 
 处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差合并），**直接从翻译步骤开始**，仅重跑受影响的部分。
 
@@ -407,6 +414,25 @@ python video_translate.py "1.mp4" -t en --server 192.168.1.100
 
 # 3. 编辑重跑——只重新翻译受影响的段落
 python video_translate.py "1.mp4" -t en --server 192.168.1.100 --edit-rerun
+```
+
+### 翻译检查工作流（`--stop-after-translation`）
+
+翻译完成后人工介入检查翻译质量，确认后再继续 TTS 合成：
+
+```
+# 1. 仅翻译，跳过 TTS / 音频合并 / 最终混音，生成 full_translation.srt
+python video_translate.py "1.mp4" -t en --server 192.168.1.100 --stop-after-translation
+
+# 2. 人工检查 segments/English/full_translation.srt 字幕内容
+#    如需修改翻译，直接编辑 SRT 文件（编辑重跑会自动解析 SRT 回写 txt）
+#    如需调整翻译风格，编辑 segments/English/translation_guidelines.txt 翻译指南
+
+# 3. 编辑重跑——用修改后的 SRT/指南重新翻译，然后继续完整流程
+python video_translate.py "1.mp4" -t en --server 192.168.1.100 --edit-rerun
+
+# 4. 如翻译无需修改，直接运行完整流程（跳过翻译，从 TTS 开始）
+python video_translate.py "1.mp4" -t en --server 192.168.1.100
 ```
 
 > 💡 编辑重跑模式与断点续跑兼容。如果编辑重跑过程中途中断，再次执行同样的 `--edit-rerun` 命令即可续跑。
