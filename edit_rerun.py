@@ -20,6 +20,8 @@
 | 删语种         | 删除本地语言目录（如 English/）         | 本地目录不存在                       | 删除服务端对应语言目录                                                  |
 | 删某句合成音频  | 删除 segments/{lang}/{stem}.mp3       | 本地合成音频 mp3 缺失                | 删除服务端对应合成音频 mp3 + 翻译候选 md + 候选目录                      |
 | 删某句翻译文本  | 删除 segments/{lang}/{stem}.txt       | 本地翻译文本缺失                     | 删除服务端对应翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录              |
+| 改翻译字幕    | 编辑 segments/{lang}/full_translation.srt | 下载服务端 SRT 对比，内容不一致       | 上传 SRT；解析 SRT 将文本写回对应 txt 并上传；删除对应 TTS 产物 + combined/final；忽略 txt 的独立修改 |
+| 改翻译指南    | 编辑 segments/{lang}/translation_guidelines.txt | 下载服务端指南对比，内容不一致    | 上传新指南；删除该语言目录下所有翻译 txt + TTS 产物 + combined/final，强制重新翻译 |
 
 处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差合并），直接从翻译步骤开始，
 仅重跑受影响的部分。
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import re
 import shutil
 import sys
 import time
@@ -49,6 +52,7 @@ from Common.config import (
     SECONDARY_DIARIZATION_CALIBRATE_LOG_FILENAME,
     COMBINED_AUDIO_FILENAME,
     FINAL_AUDIO_FILENAME,
+    TRANSLATION_GUIDELINES_FILENAME,
     build_segments_dir,
 )
 from Common.language_map import get_language_dir_name, normalize_target_language_codes
@@ -62,6 +66,73 @@ _ASR_NON_TXT_FILES = frozenset({
     ASR_SENTENCE_RECONCILE_FILENAME,
     SECONDARY_DIARIZATION_CALIBRATE_LOG_FILENAME,
 })
+
+# 完整翻译字幕文件名（由 stop_after_translation 模式生成）
+FULL_TRANSLATION_SRT_FILENAME = 'full_translation.srt'
+
+# SRT 时间戳正则：00:00:01,234 --> 00:00:03,456
+_SRT_TIMESTAMP_RE = re.compile(
+    r'(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})'
+)
+
+
+def _parse_srt_to_segments(srt_content: str) -> list[tuple[float, str]]:
+    """解析 SRT 文件内容，返回 [(start_s, text), ...] 列表。
+
+    SRT 格式：
+        1
+        00:00:00,000 --> 00:00:02,500
+        翻译文本
+
+    start_s 用于匹配 txt 文件名 stem（float(stem) ≈ start_s）。
+    文本可能跨多行，用换行符拼接。
+    """
+    segments: list[tuple[float, str]] = []
+    blocks = srt_content.strip().split('\n\n')
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        # 第二行是时间戳行
+        match = _SRT_TIMESTAMP_RE.search(lines[1])
+        if not match:
+            continue
+        h, m, s, ms = (int(x) for x in match.groups()[:4])
+        start_s = h * 3600 + m * 60 + s + ms / 1000.0
+        # 第三行开始是文本（可能多行）
+        text = '\n'.join(lines[2:]).strip()
+        segments.append((start_s, text))
+    return segments
+
+
+def _match_stem_by_start_s(
+    start_s: float,
+    existing_stems: dict[str, str],
+    tolerance: float = 0.3,
+) -> str | None:
+    """根据 SRT 开始时间匹配最近的 txt 文件 stem。
+
+    在 tolerance 容差范围内寻找时间差最小的 stem。
+
+    Args:
+        start_s: SRT 解析出的开始时间（秒）
+        existing_stems: {stem_str: stem_str} 字典（key 和 value 相同，方便查找）
+        tolerance: 允许的时间误差（秒），默认 0.3s
+
+    Returns:
+        匹配的 stem 字符串，未匹配返回 None
+    """
+    best_stem: str | None = None
+    best_diff: float = tolerance  # 初始化为容差上限
+    for stem in existing_stems:
+        try:
+            diff = abs(float(stem) - start_s)
+        except ValueError:
+            continue
+        if diff <= best_diff:
+            best_diff = diff
+            best_stem = stem
+    return best_stem
 
 
 def _compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
@@ -234,6 +305,8 @@ def _detect_and_apply_edits(
     5. 删语种：本地语言目录不存在 → 删除服务端对应目录
     6. 删某句合成音频：本地合成音频 mp3 缺失 → 删除服务端对应 合成音频 mp3/翻译候选 md/候选目录
     7. 删某句翻译文本：本地翻译文本缺失 → 删除服务端对应 翻译文本+合成音频 mp3+翻译候选 md+候选目录
+    8. 改翻译字幕：full_translation.srt 内容不一致 → 上传 SRT + 解析 SRT 写回 txt 并上传 + 删除 TTS 产物 + 忽略 txt 独立修改
+    9. 改翻译指南：translation_guidelines.txt 内容不一致 → 上传新指南 + 删除所有翻译产物强制重新翻译
 
     所有删除操作同时清理服务端和客户端本地文件，避免后续同步混乱。
 
@@ -424,7 +497,100 @@ def _detect_and_apply_edits(
                         _delete_local_tts_artifacts(local_lang_dir, stem)
                         print(f"  [删翻译文本] {lang_dir_name}/{server_file} 本地已删除 → 删除翻译文本+合成音频+翻译候选")
 
-            # 场景 2：检测翻译文本内容修改
+            # ── 场景 8：检测 full_translation.srt 修改 ──
+            # 用户修改 SRT 字幕 → 解析 SRT，将文本写回对应 txt 文件，忽略 txt 的独立修改
+            srt_handled_stems: set[str] = set()
+            local_srt = local_lang_dir / FULL_TRANSLATION_SRT_FILENAME
+            if local_srt.exists():
+                server_srt_content = _download_server_txt(
+                    client, task_id, f"{server_lang_subdir}/{FULL_TRANSLATION_SRT_FILENAME}",
+                )
+                local_srt_content = local_srt.read_text(encoding="utf-8")
+                if server_srt_content is None or local_srt_content != server_srt_content:
+                    print(f"  [改字幕] {lang_dir_name}/{FULL_TRANSLATION_SRT_FILENAME} 内容已修改")
+                    # 上传 SRT 文件
+                    upload_list.append((local_srt, f"{server_lang_subdir}/{FULL_TRANSLATION_SRT_FILENAME}"))
+                    # 解析 SRT，将文本写回对应 txt 文件
+                    srt_segments = _parse_srt_to_segments(local_srt_content)
+                    # 收集本地已有的 txt stem（排除非逐段文件）
+                    existing_stems = {
+                        f.stem: f.stem for f in local_lang_dir.glob('*.txt')
+                        if f.name not in (
+                            TRANSLATION_GUIDELINES_FILENAME,
+                            FULL_TRANSLATION_SRT_FILENAME,
+                        )
+                    }
+                    for start_s, text in srt_segments:
+                        stem = _match_stem_by_start_s(start_s, existing_stems)
+                        if stem is None:
+                            print(f"    [跳过] SRT 中 start={start_s:.3f}s 未匹配到任何 txt 文件")
+                            continue
+                        local_txt = local_lang_dir / f"{stem}.txt"
+                        # 比对 SRT 解析出的文本与现有 txt 内容，一致则跳过
+                        existing_text = local_txt.read_text(encoding="utf-8") if local_txt.exists() else ""
+                        if existing_text == text:
+                            srt_handled_stems.add(stem)
+                            continue
+                        # 文本有变更 → 写入本地 txt + 上传 + 删除 TTS 产物
+                        local_txt.write_text(text, encoding="utf-8")
+                        upload_list.append((local_txt, f"{server_lang_subdir}/{stem}.txt"))
+                        delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                        delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                        delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                        _delete_local_tts_artifacts(local_lang_dir, stem)
+                        srt_handled_stems.add(stem)
+                        print(f"    [SRT→txt] {stem}.txt 已更新")
+                    # 删除 combined/final（内容已变，需重新合成）
+                    delete_files.append(f"{server_lang_subdir}/{COMBINED_AUDIO_FILENAME}")
+                    delete_files.append(f"{server_lang_subdir}/{FINAL_AUDIO_FILENAME}")
+                    for _fname in (COMBINED_AUDIO_FILENAME, FINAL_AUDIO_FILENAME):
+                        _local_f = local_lang_dir / _fname
+                        if _local_f.exists():
+                            _local_f.unlink()
+
+            # ── 场景 9：检测 translation_guidelines.txt 修改 ──
+            # 用户修改翻译指南 → 上传新指南 + 删除所有翻译产物强制重新翻译
+            local_guidelines = local_lang_dir / TRANSLATION_GUIDELINES_FILENAME
+            if local_guidelines.exists():
+                server_guidelines_content = _download_server_txt(
+                    client, task_id, f"{server_lang_subdir}/{TRANSLATION_GUIDELINES_FILENAME}",
+                )
+                local_guidelines_content = local_guidelines.read_text(encoding="utf-8")
+                if server_guidelines_content is None or local_guidelines_content != server_guidelines_content:
+                    print(f"  [改翻译指南] {lang_dir_name}/{TRANSLATION_GUIDELINES_FILENAME} 内容已修改")
+                    upload_list.append((local_guidelines, f"{server_lang_subdir}/{TRANSLATION_GUIDELINES_FILENAME}"))
+                    # 删除所有翻译 txt + TTS 产物，强制服务端用新指南重新翻译
+                    _PROTECTED_FILES = frozenset({
+                        TRANSLATION_GUIDELINES_FILENAME,
+                        FULL_TRANSLATION_SRT_FILENAME,
+                        COMBINED_AUDIO_FILENAME,
+                        FINAL_AUDIO_FILENAME,
+                    })
+                    for server_file in server_lang_files_info:
+                        if server_file in _PROTECTED_FILES:
+                            continue
+                        stem = server_file.rsplit(".", 1)[0]
+                        ext = server_file.rsplit(".", 1)[1] if "." in server_file else ""
+                        if ext in ("txt", "mp3", "md"):
+                            delete_files.append(f"{server_lang_subdir}/{server_file}")
+                            if ext in ("mp3", "md"):
+                                _delete_local_tts_artifacts(local_lang_dir, stem)
+                            elif ext == "txt":
+                                _local_txt = local_lang_dir / server_file
+                                if _local_txt.exists():
+                                    _local_txt.unlink()
+                        # 删除候选目录
+                        delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                    # 删除 combined/final
+                    delete_files.append(f"{server_lang_subdir}/{COMBINED_AUDIO_FILENAME}")
+                    delete_files.append(f"{server_lang_subdir}/{FINAL_AUDIO_FILENAME}")
+                    for _fname in (COMBINED_AUDIO_FILENAME, FINAL_AUDIO_FILENAME):
+                        _local_f = local_lang_dir / _fname
+                        if _local_f.exists():
+                            _local_f.unlink()
+                    print(f"    已删除 {lang_dir_name}/ 下所有翻译产物，服务端将用新指南重新翻译")
+
+            # 场景 2：检测翻译文本内容修改（SRT 已处理的 stem 跳过）
             for local_file in local_lang_dir.iterdir():
                 if local_file.name.startswith('.'):
                     continue
@@ -432,8 +598,15 @@ def _detect_and_apply_edits(
                     continue
                 if not local_file.name.endswith(".txt"):
                     continue
+                # 跳过非逐段 txt 文件（翻译指南等）
+                if local_file.name in (TRANSLATION_GUIDELINES_FILENAME,):
+                    continue
 
                 stem = local_file.name.rsplit(".", 1)[0]
+                # SRT 已处理的 stem 跳过（文本已从 SRT 写入）
+                if stem in srt_handled_stems:
+                    continue
+
                 server_txt_path = f"{server_lang_subdir}/{local_file.name}"
 
                 # 服务端没有此翻译文本（可能是客户端新增的翻译，不在编辑重跑场景内，跳过）
