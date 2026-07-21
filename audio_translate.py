@@ -225,8 +225,12 @@ def _validate_independent_dirs(input_paths: list[Path]):
             print(f"  目录: {dir_path}")
             for fp in fps:
                 print(f"    - {fp.name}")
-        print('每个视频/音频文件必须在独立目录下，')
+        print('每个视频/音频文件必须在独立目录下，且同一批量任务中各目录名不能重复，')
         print('否则翻译中间结果（segments/、.vt_task_id 等）会互相覆盖导致错乱。')
+        print('推荐做法：将每集放入独立子目录，目录名和文件名用集号对应，如：')
+        print('  短剧/1/1.mp4')
+        print('  短剧/2/2.mp4')
+        print('  短剧/3/3.mp4')
         print('解决方法：将每个视频/音频拷贝到新的独立目录下再执行。')
         sys.exit(1)
 
@@ -250,12 +254,17 @@ def _validate_unique_parent_dirs(input_paths: list[Path]):
 
     duplicates = {name: paths for name, paths in name_to_paths.items() if len(paths) > 1}
     if duplicates:
-        print("[错误] 多个输入文件位于同名目录下，服务端子目录会冲突，segments 结果将互相覆盖！")
+        print("[错误] 多个输入文件的目录名重复，服务端子目录会冲突，segments 结果将互相覆盖！")
         for name, paths in duplicates.items():
             print(f"  目录名 \"{name}\":")
             for p in paths:
                 print(f"    {p}")
-        print("请将各视频/音频放入不同名称的目录后再运行。")
+        print('每个视频/音频文件必须在独立目录下，且同一批量任务中各目录名不能重复。')
+        print('推荐做法：将每集放入独立子目录，目录名和文件名用集号对应，如：')
+        print('  短剧/1/1.mp4')
+        print('  短剧/2/2.mp4')
+        print('  短剧/3/3.mp4')
+        print('请将各视频/音频放入不同名称的目录后再运行。')
         sys.exit(1)
 
 

@@ -319,8 +319,12 @@ def main():
             print(f"  目录: {dir_path}")
             for vp in vps:
                 print(f"    - {vp.name}")
-        print('每个视频/音频文件必须在独立目录下，')
+        print('每个视频/音频文件必须在独立目录下，且同一批量任务中各目录名不能重复，')
         print('否则翻译中间结果（segments/、.vt_task_id 等）会互相覆盖导致错乱。')
+        print('推荐做法：将每集放入独立子目录，目录名和文件名用集号对应，如：')
+        print('  短剧/1/1.mp4')
+        print('  短剧/2/2.mp4')
+        print('  短剧/3/3.mp4')
         print('解决方法：将每个视频拷贝到新的独立目录下再执行。')
         sys.exit(1)
 
