@@ -118,6 +118,75 @@ def _validate_task_ids(input_paths: list[Path]) -> str | None:
     return the_id
 
 
+def _exit_task_not_found(task_id: str, input_paths: list[Path]):
+    """task_id 在服务端不存在时报错退出。
+
+    说明该任务的历史记录不在此服务器上（workspace 可能已被清理或此为另一台服务器）。
+    """
+    print(f"[错误] 已保存的 task_id={task_id} 在服务端不存在。")
+    print(f"  该任务的历史记录不在此服务器上（workspace 可能已被清理或此为另一台服务器）。")
+    print(f"  解决方法：")
+    print(f"    1. 删除以下 .vt_task_id 文件后重试：")
+    for p in input_paths:
+        marker = Path(p).parent / TASK_ID_FILENAME
+        print(f"       {marker}")
+    print(f"    2. 或使用 --new-task 参数强制创建新任务")
+    sys.exit(1)
+
+
+def _validate_input_files_match(client: RemoteScriptClient, task_id: str,
+                                 input_paths: list[Path]):
+    """校验当前输入文件与服务端历史任务是否一致。
+
+    如果服务端已有不同的媒体文件，说明用户在同一个 task_id 下换了视频/音频文件，
+    会导致翻译中间结果互相覆盖。此时应报错退出。
+
+    匹配规则（按文件名 stem 比较，不比较扩展名）：
+      - stem 完全相同 → 同一源文件（如之前上传 .mp3，现在上传 .mp4）
+      - 服务端文件 stem 以 "{input_stem}_" 开头 → 流水线派生文件
+        （如 {stem}_vocals.mp3、{stem}_others.mp3、{stem}_vocals_denoised.mp3）
+      - 以上都不匹配，且服务端有其他媒体文件 → 不同源，报错
+    """
+    media_exts = {'.mp3', '.mp4', '.wav', '.m4a', '.flac', '.aac', '.ogg'}
+    for input_path in input_paths:
+        p = Path(input_path)
+        dest_dir = _compute_dest_dir(p)
+        try:
+            result = client.list_files(task_id, sub_dir=dest_dir, since=0)
+            server_files = {item["name"] for item in result.get("items", [])
+                           if item["type"] == "file"}
+        except Exception:
+            # 子目录不存在，跳过检查（可能是新目录）
+            continue
+
+        input_stem = p.stem
+        server_stems = {Path(f).stem for f in server_files}
+
+        # 同一源文件（扩展名可能不同，如 mp3 → mp4）
+        if input_stem in server_stems:
+            continue
+
+        # 流水线派生文件（{stem}_vocals.mp3、{stem}_others.mp3 等）
+        if any(s.startswith(f"{input_stem}_") for s in server_stems):
+            continue
+
+        # 当前文件不在服务端，检查是否有其他媒体文件（不同源视频/音频）
+        server_media = {f for f in server_files
+                       if Path(f).suffix.lower() in media_exts}
+        if server_media:
+            print(f"[错误] 输入文件与历史任务不匹配！")
+            print(f"  当前输入: {dest_dir}/{p.name}")
+            print(f"  服务端历史文件: {', '.join(sorted(server_media))}")
+            print(f"  task_id={task_id} 对应的任务使用的是不同的视频/音频文件。")
+            print(f"  每次任务的视频/音频文件必须在独立文件夹下，")
+            print(f"  否则翻译中间结果会互相覆盖导致错乱。")
+            print(f"  解决方法：将要翻译的视频/音频拷贝到新的独立目录下再执行。")
+            sys.exit(1)
+
+
+
+
+
 
 
 
@@ -125,13 +194,42 @@ def _validate_task_ids(input_paths: list[Path]) -> str | None:
 # ─── 辅助函数 ─────────────────────────────────────────────
 
 def _compute_dest_dir(file_path: Path) -> str:
-    """计算文件在服务端工作目录中的子目录名（父目录名 + hash 防冲突）。
+    """计算文件在服务端工作目录中的子目录名（直接用父目录名）。
 
-    例如：E:\\...\\《逐玉》\\1.mp3 → "《逐玉》_a3f1"
+    例如：E:\\...\\《逐玉》\\1.mp3 → "《逐玉》"
+
+    多输入时，调用方应先通过 _validate_unique_parent_dirs 校验
+    各输入文件的父目录名不重复，否则 segments 目录会冲突。
     """
-    parent = file_path.resolve().parent
-    hash_suffix = hashlib.md5(str(parent).encode()).hexdigest()[:4]
-    return f"{parent.name}_{hash_suffix}"
+    return file_path.resolve().parent.name
+
+
+def _validate_unique_parent_dirs(input_paths: list[Path]):
+    """校验多个输入文件的父目录名是否唯一。
+
+    服务端用父目录名作为子目录名（_compute_dest_dir），
+    如果两个不同路径的输入文件父目录名相同（如 ...\\A\\1.mp3 和 ...\\B\\A\\2.mp3），
+    它们的 segments 会写到同一个子目录下，导致结果互相覆盖。
+
+    检测到重名时直接 sys.exit(1) 提示用户。
+    """
+    if len(input_paths) <= 1:
+        return
+
+    name_to_paths: dict[str, list[Path]] = {}
+    for p in input_paths:
+        parent_name = p.resolve().parent.name
+        name_to_paths.setdefault(parent_name, []).append(p)
+
+    duplicates = {name: paths for name, paths in name_to_paths.items() if len(paths) > 1}
+    if duplicates:
+        print("[错误] 多个输入文件位于同名目录下，服务端子目录会冲突，segments 结果将互相覆盖！")
+        for name, paths in duplicates.items():
+            print(f"  目录名 \"{name}\":")
+            for p in paths:
+                print(f"    {p}")
+        print("请将各视频/音频放入不同名称的目录后再运行。")
+        sys.exit(1)
 
 
 def _compute_video_summary(file_paths: list[Path]) -> str:
@@ -231,6 +329,10 @@ def _build_remote_args(args) -> list[str]:
     # 编辑重跑模式：透传 --skip-asr 让服务端跳过 ASR 流程
     if getattr(args, 'edit_rerun', False):
         remote_args.append('--skip-asr')
+
+    # 仅翻译模式：透传 --stop-after-translation 让服务端跳过 TTS / 合并 / 混音
+    if getattr(args, 'stop_after_translation', False):
+        remote_args.append('--stop-after-translation')
 
     return remote_args
 
@@ -477,6 +579,10 @@ def main():
                    help='TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: 0.2')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
                    help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
+    p.add_argument('--stop-after-translation', action='store_true',
+                   help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
+                        '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
+                        '核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。')
                    
     p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
@@ -507,11 +613,20 @@ def main():
     # 无则上传文件 + 创建新任务
     # 多视频时，所有视频目录的 .vt_task_id 必须一致，否则报错
     input_paths = [Path(p) for p in args.inputs]
+
+    # 校验多输入时父目录名不重复（否则服务端子目录冲突）
+    _validate_unique_parent_dirs(input_paths)
+
     task_id = None
     if not args.new_task:
         task_id = _validate_task_ids(input_paths)
         if task_id:
-            print(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
+            if client.task_exists(task_id):
+                print(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
+                # 校验输入文件与历史任务是否一致（防止换视频导致中间结果覆盖）
+                _validate_input_files_match(client, task_id, input_paths)
+            else:
+                _exit_task_not_found(task_id, input_paths)
 
     # ── 1. 上传音频文件 ──────────────────────────────────────
     # 老 task_id 时先查询服务端已有文件，size 一致则跳过上传

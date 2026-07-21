@@ -63,6 +63,8 @@ def process_video_pipeline(
     extra_translation_guideline: str | None = None,
     enable_visual_diarization: bool = False,
     edit_rerun: bool = False,
+    stop_after_translation: bool = False,
+    new_task: bool = False,
 ):
     """视频翻译主流程：提取音频 → 远程翻译 → 本地原视频画面 + 新音轨 mux。
 
@@ -168,6 +170,12 @@ def process_video_pipeline(
         if edit_rerun:
             audio_argv.append("--edit-rerun")
 
+        if stop_after_translation:
+            audio_argv.append("--stop-after-translation")
+
+        if new_task:
+            audio_argv.append("--new-task")
+
         print(f"调用 audio_translate.py (server={server_url})...")
         # 临时替换 sys.argv 以直接调用 audio_translate.main()
         original_argv = sys.argv
@@ -184,6 +192,12 @@ def process_video_pipeline(
             sys.argv = original_argv
 
     # ── Step 3: 合并音轨（视频画面保持原速，不做任何切分/调速）──────────
+    # stop_after_translation 模式下没有 final.mp3，跳过音轨合并
+    if stop_after_translation:
+        print("\n--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
+        print("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
+        return
+
     print(f"\n--- Step 3: 合并音轨 ---")
 
     # 合成前同步检查：确保本地文件与服务端一致（所有模式统一执行）
@@ -275,6 +289,13 @@ def main():
                    help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
                         '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
                         '要求服务端已有该任务的运行记录。')
+    p.add_argument('--stop-after-translation', action='store_true',
+                   help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
+                        '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
+                        '核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。')
+    p.add_argument('--new-task', action='store_true',
+                   help='忽略本地保存的 task_id，强制创建新任务。'
+                        '当 .vt_task_id 文件指向的任务不在当前服务器时使用。')
 
     
     args = p.parse_args()
@@ -321,6 +342,8 @@ def main():
             extra_translation_guideline=args.extra_translation_guideline,
             enable_visual_diarization=args.enable_visual_diarization,
             edit_rerun=args.edit_rerun,
+            stop_after_translation=args.stop_after_translation,
+            new_task=args.new_task,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

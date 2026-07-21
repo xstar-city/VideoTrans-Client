@@ -1,0 +1,5 @@
+﻿filename,text,similarity,duration_s,ref_duration_s,mean_duration_s,all_durations_s,attempt_index,request_round,source
+1.mp3,You little brat! Watch your mouth! You are the pig! Your whole family are pigs! Serves you right for being a butcher!,0.214,6.12,6.88,6.135,"[6.12, 6.6, 6.42, 5.34, 6.9, 5.43]",1,1,翻译#1/请求#1
+2.mp3,You little brat! Watch your mouth! You are the pig! Your whole family are pigs! Serves you right for being a butcher!,0.216,6.6,6.88,6.135,"[6.12, 6.6, 6.42, 5.34, 6.9, 5.43]",1,1,翻译#1/请求#1
+3.mp3,You little brat! Watch your mouth! You are the pig! Your whole family are pigs! Serves you right for being a butcher!,0.251,6.42,6.88,6.135,"[6.12, 6.6, 6.42, 5.34, 6.9, 5.43]",1,1,翻译#1/请求#1
+4.mp3,You little brat! Watch your mouth! You are the pig! Your whole family are pigs! Serves you right for being a butcher!,0.253,6.9,6.88,6.135,"[6.12, 6.6, 6.42, 5.34, 6.9, 5.43]",1,1,翻译#1/请求#1

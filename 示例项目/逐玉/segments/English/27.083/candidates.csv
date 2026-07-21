@@ -1,0 +1,6 @@
+﻿filename,text,similarity,duration_s,ref_duration_s,mean_duration_s,all_durations_s,attempt_index,request_round,source
+1.mp3,What the hell are you saying?,0.089,1.4,1.621,1.625,"[1.4, 2.04, 1.45, 1.37, 1.75, 1.74]",1,1,翻译#1/请求#1
+2.mp3,What the hell are you saying?,0.19,1.45,1.621,1.625,"[1.4, 2.04, 1.45, 1.37, 1.75, 1.74]",1,1,翻译#1/请求#1
+3.mp3,What the hell are you saying?,0.212,1.37,1.621,1.625,"[1.4, 2.04, 1.45, 1.37, 1.75, 1.74]",1,1,翻译#1/请求#1
+4.mp3,What the hell are you saying?,0.26,1.75,1.621,1.625,"[1.4, 2.04, 1.45, 1.37, 1.75, 1.74]",1,1,翻译#1/请求#1
+5.mp3,What the hell are you saying?,0.123,1.74,1.621,1.625,"[1.4, 2.04, 1.45, 1.37, 1.75, 1.74]",1,1,翻译#1/请求#1

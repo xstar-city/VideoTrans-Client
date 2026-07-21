@@ -107,6 +107,24 @@ class RemoteScriptClient:
                 f"  可能原因：端口被占用（如 Docker Desktop 端口残留），服务端进程僵死。"
             )
 
+    # ─── 任务目录检查 ────────────────────────────────────────
+
+    def task_exists(self, task_id: str) -> bool:
+        """检查 task_id 对应的任务目录是否存在于服务端。
+
+        用于客户端断点续跑前验证旧 task_id 是否仍然有效
+        （服务端 workspace 可能被清理或重部署）。
+        """
+        try:
+            resp = requests.get(
+                f"{self.base_url}/files/{task_id}",
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            return resp.status_code == 200
+        except requests.exceptions.RequestException:
+            return False
+
     # ─── 上传文件 ──────────────────────────────────────────
 
     def upload(self, file_path: str | Path,
