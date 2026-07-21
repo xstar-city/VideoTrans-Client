@@ -204,6 +204,33 @@ def _compute_dest_dir(file_path: Path) -> str:
     return file_path.resolve().parent.name
 
 
+def _validate_independent_dirs(input_paths: list[Path]):
+    """校验多个输入文件是否各自在独立目录中。
+
+    同一目录下不能有多个输入文件，否则翻译中间结果（segments/、.vt_task_id 等）
+    会互相覆盖导致错乱。
+    """
+    if len(input_paths) <= 1:
+        return
+
+    dir_to_files: dict[str, list[Path]] = {}
+    for p in input_paths:
+        dir_key = str(p.resolve().parent)
+        dir_to_files.setdefault(dir_key, []).append(p)
+
+    multi_file_dirs = {d: fps for d, fps in dir_to_files.items() if len(fps) > 1}
+    if multi_file_dirs:
+        print('[错误] 以下目录中包含多个输入文件，违反"每个视频/音频独立目录"规则：')
+        for dir_path, fps in multi_file_dirs.items():
+            print(f"  目录: {dir_path}")
+            for fp in fps:
+                print(f"    - {fp.name}")
+        print('每个视频/音频文件必须在独立目录下，')
+        print('否则翻译中间结果（segments/、.vt_task_id 等）会互相覆盖导致错乱。')
+        print('解决方法：将每个视频/音频拷贝到新的独立目录下再执行。')
+        sys.exit(1)
+
+
 def _validate_unique_parent_dirs(input_paths: list[Path]):
     """校验多个输入文件的父目录名是否唯一。
 
@@ -613,6 +640,9 @@ def main():
     # 无则上传文件 + 创建新任务
     # 多视频时，所有视频目录的 .vt_task_id 必须一致，否则报错
     input_paths = [Path(p) for p in args.inputs]
+
+    # 校验多个输入文件各自在独立目录中（同一目录下不能有多个输入文件）
+    _validate_independent_dirs(input_paths)
 
     # 校验多输入时父目录名不重复（否则服务端子目录冲突）
     _validate_unique_parent_dirs(input_paths)

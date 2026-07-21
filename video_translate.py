@@ -319,8 +319,9 @@ def main():
             print(f"  目录: {dir_path}")
             for vp in vps:
                 print(f"    - {vp.name}")
-        print('请将每个视频移到独立的子目录中，避免翻译中间文件互相覆盖。')
-        print('提示：可运行 Tools\\organize_videos_into_folders.py 自动整理视频到独立目录。')
+        print('每个视频/音频文件必须在独立目录下，')
+        print('否则翻译中间结果（segments/、.vt_task_id 等）会互相覆盖导致错乱。')
+        print('解决方法：将每个视频拷贝到新的独立目录下再执行。')
         sys.exit(1)
 
     try:
