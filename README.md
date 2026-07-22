@@ -255,7 +255,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
-| `--tts-aware-max-retries` | TTS 时长调整重试次数 | 10 |
+| `--tts-aware-max-retries` | TTS 感知翻译自适应重试次数 | 10 |
 | `--tts-max-audio-slowdown-pct` | TTS 合成音频最大减速百分比（合成短于参考时 librosa 拉伸放慢的上限） | 0.2 |
 | `--tts-max-audio-speedup-pct` | TTS 合成音频最大加速百分比（合成长于参考时 librosa 拉伸加快的上限） | 0.2 |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量（1-10，服务端自动限制范围） | 3 |

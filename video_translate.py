@@ -276,7 +276,7 @@ def main():
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 10）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS感知翻译中每句的自适应翻译重试次数（默认: 10）')
     p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
                    help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
     p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
