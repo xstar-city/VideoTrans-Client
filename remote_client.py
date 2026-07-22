@@ -47,6 +47,68 @@ def normalize_server_url(server: str, port: int = 8000) -> str:
     return f"http://{server}:{port}"
 
 
+def resolve_via_scheduler(scheduler: str, port: int = 8000, timeout: float = 15.0) -> str:
+    """向调度器请求分配一个空闲服务端节点，返回该节点 URL。
+
+    参数:
+        scheduler: 调度器地址，支持 IP、域名或完整 URL（同 normalize_server_url）
+        port: 调度器默认端口（当地址未显式带端口时使用）
+        timeout: 请求超时（秒）
+
+    返回:
+        分配到的服务端节点 URL，如 "http://1.2.3.4:8000"
+
+    异常:
+        ConnectionError: 调度器不可达
+        RuntimeError: 调度器无空闲节点（全忙）或其他分配错误
+    """
+    scheduler_url = normalize_server_url(scheduler, port=port)
+    try:
+        resp = requests.get(f"{scheduler_url}/allocate", timeout=timeout)
+    except requests.exceptions.ConnectionError as e:
+        raise ConnectionError(
+            f"无法连接调度器: {scheduler_url}\n"
+            f"  请确认调度器已启动且端口正确。\n"
+            f"  原始错误: {e}"
+        )
+    except requests.exceptions.Timeout:
+        raise ConnectionError(f"连接调度器超时 ({timeout}s): {scheduler_url}")
+
+    if resp.status_code == 200:
+        worker_url = resp.json()["server_url"]
+        print(f"已通过调度器 {scheduler_url} 分配空闲服务端: {worker_url}")
+        return worker_url
+
+    # 503 = 全部忙碌 / 暂无注册节点；从 detail 中提取可读信息
+    message = None
+    try:
+        detail = resp.json().get("detail")
+        if isinstance(detail, dict):
+            message = detail.get("message")
+        elif isinstance(detail, str):
+            message = detail
+    except ValueError:
+        pass
+    if not message:
+        message = f"调度器分配失败 (HTTP {resp.status_code}): {scheduler_url}"
+    raise RuntimeError(message)
+
+
+def resolve_server_arg(server: str, scheduler: Optional[str] = None) -> str:
+    """根据 --server / --scheduler 命令行参数解析最终服务端 URL。
+
+    - scheduler 非空：向调度器请求分配空闲节点（新模式）
+    - 否则：直连 --server 指定的地址（老模式，行为不变）
+
+    异常:
+        ConnectionError: 调度器不可达
+        RuntimeError: 调度器无空闲节点
+    """
+    if scheduler:
+        return resolve_via_scheduler(scheduler)
+    return normalize_server_url(server)
+
+
 class RemoteScriptClient:
     """通用远程脚本执行客户端"""
 

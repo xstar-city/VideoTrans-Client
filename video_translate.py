@@ -37,7 +37,7 @@ from Common.video_utils import (
     extract_audio_ffmpeg,
     mux_audio_into_video,
 )
-from remote_client import normalize_server_url
+from remote_client import resolve_server_arg
 
 
 # ============================================================
@@ -276,7 +276,7 @@ def main():
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=3, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 10）')
     p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
                    help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
     p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
@@ -284,7 +284,12 @@ def main():
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
                    help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
 
-    p.add_argument('--server', default='localhost', help='服务端地址，支持 IP、域名或完整 URL（如 117.50.47.18 / http://117.50.47.18/ ）。默认: localhost')
+    server_group = p.add_mutually_exclusive_group()
+    server_group.add_argument('--server', default='localhost',
+                              help='服务端地址（直连模式），支持 IP、域名或完整 URL（如 117.50.47.18 / http://117.50.47.18/ ）。默认: localhost')
+    server_group.add_argument('--scheduler', default=None,
+                              help='调度器地址（IP/域名/URL），指定后由调度器自动分配空闲服务端。'
+                                   '与 --server 互斥。')
     p.add_argument('--edit-rerun', '-e', action='store_true',
                    help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
                         '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
@@ -328,11 +333,18 @@ def main():
         print('解决方法：将每个视频拷贝到新的独立目录下再执行。')
         sys.exit(1)
 
+    # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
+    try:
+        server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
+
     try:
         process_video_pipeline(
             video_paths,
             args.targets,
-            normalize_server_url(args.server),
+            server_url,
             source=args.source,
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,

@@ -41,6 +41,7 @@ from Common.video_utils import (
     mux_audio_into_video,
     sync_video_to_audio,
 )
+from remote_client import resolve_server_arg
 
 # ─── 视频发现与整理 ───────────────────────────────────────
 
@@ -354,10 +355,19 @@ def main():
                    help='包含额外翻译指南的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=3,
                    help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
-    p.add_argument('--server', default='localhost',
-                   help='服务端 IP 地址 (默认: localhost)')
+    server_group = p.add_mutually_exclusive_group()
+    server_group.add_argument('--server', default='localhost',
+                              help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
+    server_group.add_argument('--scheduler', default=None,
+                              help='调度器地址（IP/域名/URL），指定后由调度器自动分配空闲服务端。'
+                                   '与 --server 互斥。')
     args = p.parse_args()
-    server_url = normalize_server_url(args.server)
+    # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
+    try:
+        server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
 
     root_dir = Path(args.input_dir).resolve()
     if not root_dir.exists() or not root_dir.is_dir():

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 
-from remote_client import normalize_server_url
+from remote_client import resolve_server_arg
 from video_translate import process_video_pipeline
 
 
@@ -33,7 +33,12 @@ def main():
     p.add_argument("--source", "-s", default="zh", help="源语言代码，默认：zh")
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
-    p.add_argument("--server", default="localhost", help="服务端 IP 地址，默认：localhost")
+    server_group = p.add_mutually_exclusive_group()
+    server_group.add_argument("--server", default="localhost",
+                              help="服务端地址（直连模式），支持 IP、域名或完整 URL。默认：localhost")
+    server_group.add_argument("--scheduler", default=None,
+                              help="调度器地址（IP/域名/URL），指定后由调度器自动分配空闲服务端。"
+                                   "与 --server 互斥。")
     # ── 可覆盖的预置参数 ──
     p.add_argument("--denoise", choices=["none", "normal", "aggressive"], default="aggressive", help="音频降噪类型，默认：aggressive")
     p.add_argument("--translation-models", default="", help="翻译模型列表，空值使用默认模型")
@@ -63,11 +68,18 @@ def main():
         print('请将每个视频移到独立的子目录中，避免翻译中间文件互相覆盖。')
         sys.exit(1)
 
+    # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
+    try:
+        server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
+
     try:
         process_video_pipeline(
             video_paths,
             args.targets,
-            normalize_server_url(args.server),
+            server_url,
             source=args.source,
             separate=args.separate,
             # ── 基本模式预置参数 ──

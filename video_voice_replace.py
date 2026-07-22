@@ -57,7 +57,7 @@ from Common.video_utils import (
     extract_audio_ffmpeg,
     mux_audio_into_video,
 )
-from remote_client import RemoteScriptClient, normalize_server_url
+from remote_client import RemoteScriptClient, resolve_server_arg
 
 # 复用 audio_translate.py 的 task_id 管理和文件同步逻辑
 from audio_translate import (
@@ -630,8 +630,12 @@ def main():
                         '开启后 TTS 合成人声会与背景音混音输出 final.mp3；关闭时直接使用 combined.mp3。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive',
                    help='降噪类型（需要人声分离）。默认：aggressive')
-    p.add_argument('--server', default='localhost',
-                   help='服务端地址，支持 IP、域名或完整 URL。默认: localhost')
+    server_group = p.add_mutually_exclusive_group()
+    server_group.add_argument('--server', default='localhost',
+                              help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
+    server_group.add_argument('--scheduler', default=None,
+                              help='调度器地址（IP/域名/URL），指定后由调度器自动分配空闲服务端。'
+                                   '与 --server 互斥。')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
     p.add_argument('--edit-rerun', action='store_true',
                    help='编辑重跑模式：检测本地对 segments/ 的编辑（改 ASR 文本、删合成音频 mp3），'
@@ -667,7 +671,12 @@ def main():
         print('请将每个文件移到独立的子目录中，避免中间文件互相覆盖。')
         sys.exit(1)
 
-    server_url = normalize_server_url(args.server)
+    # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
+    try:
+        server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
 
     process_voice_replace_pipeline(
         video_paths,

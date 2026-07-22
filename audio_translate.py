@@ -33,7 +33,7 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 
 
-from remote_client import RemoteScriptClient, normalize_server_url
+from remote_client import RemoteScriptClient, resolve_server_arg
 
 from edit_rerun import preprocess_edit_rerun
 
@@ -587,6 +587,26 @@ def _find_local_only_files(
     return extras
 
 
+# ─── 错误代码解析 ─────────────────────────────────────────
+
+def _parse_error_code(stdout_lines: list[str]) -> tuple[str | None, str | None]:
+    """从 stdout 行中解析服务端输出的错误代码。
+
+    服务端输出格式：>>> ERROR: {code} | {message}
+
+    返回 (error_code, error_message)，未找到则返回 (None, None)。
+    """
+    for line in reversed(stdout_lines):
+        line = line.strip()
+        if line.startswith('>>> ERROR:'):
+            rest = line[len('>>> ERROR:'):].strip()
+            if '|' in rest:
+                code, msg = rest.split('|', 1)
+                return code.strip(), msg.strip()
+            return rest, None
+    return None, None
+
+
 # ─── 主流程 ────────────────────────────────────────────────
 
 def main():
@@ -608,7 +628,7 @@ def main():
     p.add_argument('--translation-models', default='', help='用于翻译的逗号分隔模型列表。空值使用服务端默认值。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=3, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 10）')
     p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
                    help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
     p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
@@ -620,7 +640,12 @@ def main():
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
                         '核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。')
                    
-    p.add_argument('--server', default='localhost', help='服务端 IP 地址 (默认: localhost)')
+    server_group = p.add_mutually_exclusive_group()
+    server_group.add_argument('--server', default='localhost',
+                              help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
+    server_group.add_argument('--scheduler', default=None,
+                              help='调度器地址（IP/域名/URL），指定后由调度器自动分配空闲服务端。'
+                                   '与 --server 互斥。')
     p.add_argument('--new-task', action='store_true', help='忽略本地保存的 task_id，强制创建新任务。')
     p.add_argument('--edit-rerun', action='store_true',
                    help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
@@ -632,7 +657,12 @@ def main():
 
     task_start_time = time.time()
 
-    server_url = normalize_server_url(args.server)
+    # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
+    try:
+        server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
     client = RemoteScriptClient(server_url)
 
     # ── 预检：验证服务端可达 ──────────────────────────────────
@@ -772,6 +802,7 @@ def main():
     # ── 4. 轮询 + 全量扫描下载 ──────────────────────────────
     last_sync_check = 0.0  # 同步频率控制：wall clock
     last_line = 0
+    last_stdout_lines: list[str] = []  # 捕获 stdout 行，用于错误代码解析
 
     # 为每个输入文件计算本地目录和对应的子目录名
     input_sync_info = []
@@ -786,6 +817,7 @@ def main():
         stdout = status_info.get("stdout", "")
         if stdout:
             print(stdout, end='', flush=True)
+            last_stdout_lines.extend(stdout.splitlines())
         last_line = status_info.get("total_lines", last_line)
 
         # 每 3 秒全量扫描下载：确保之前下载失败的文件被重试
@@ -816,8 +848,22 @@ def main():
         print(f"task_id={task_id} 已保存，重跑可恢复。")
         sys.exit(130)
     except RuntimeError as e:
-        print(f"\n任务失败: {e}")
-        sys.exit(1)
+        # 尝试从已捕获的 stdout 中解析服务端输出的错误代码
+        error_code, error_msg = _parse_error_code(last_stdout_lines)
+        if error_code:
+            if error_code == 'E_CANCEL':
+                print(f"\n任务已取消 (E_CANCEL)")
+                print(f"task_id={task_id} 已保存，重跑可恢复。")
+                sys.exit(1)
+            else:
+                print(f"\n[错误] {error_code}: {error_msg or '流水线执行失败'}")
+                print(f"错误代码说明请参考: 错误代码说明.md")
+                print(f"task_id={task_id} 已保存，重跑可恢复。")
+                sys.exit(1)
+        else:
+            print(f"\n任务失败: {e}")
+            print(f"task_id={task_id} 已保存，重跑可恢复。")
+            sys.exit(1)
     except TimeoutError as e:
         print(f"\n任务超时: {e}")
         # 查询服务端任务当前状态，帮助用户判断是否仍在运行
