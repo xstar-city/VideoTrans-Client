@@ -255,7 +255,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
-| `--tts-aware-max-retries` | TTS 时长调整重试次数 | 3 |
+| `--tts-aware-max-retries` | TTS 时长调整重试次数 | 10 |
 | `--tts-max-audio-slowdown-pct` | TTS 合成音频最大减速百分比（合成短于参考时 librosa 拉伸放慢的上限） | 0.2 |
 | `--tts-max-audio-speedup-pct` | TTS 合成音频最大加速百分比（合成长于参考时 librosa 拉伸加快的上限） | 0.2 |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量（1-10，服务端自动限制范围） | 3 |
@@ -284,7 +284,7 @@ DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite
 
 | 层 | 手段 | 何时触发 |
 |---|------|---------|
-| 第 1 层 | LLM 调整翻译措辞 | 仅 `tts_aware` 模式：试合成 → 测时长 → 超范围则让 LLM 改写措辞重译，默认重试 3 次 |
+| 第 1 层 | LLM 调整翻译措辞 | 仅 `tts_aware` 模式：试合成 → 测时长 → 超范围则让 LLM 改写措辞重译，默认重试 10 次 |
 | 第 2 层 | 模型重合成（仅支持 `duration` 参数的 TTS） | 第 1 层无法消化时，用带 duration 参数喂回模型直接生成等长音频 |
 | 第 3 层 | librosa 信号级时长拉伸 | 兜底：严格把音频拉到目标时长，所有 TTS 通用 |
 
@@ -293,7 +293,7 @@ DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite
 `--translation-mode` 控制是否启用第 1 层：
 
 - **`independent`**（独立翻译）：只做文本翻译，不调整措辞控制时长。翻译速度快，所有时长差异完全由第 3 层 librosa 拉伸消化，长差异大的句子语速变化会比较明显。
-- **`tts_aware`**（TTS 时长感知翻译，默认）：试合成 + 时长反馈循环，大部分差异在第 1 层就被消化，语音自然度更高。`--tts-aware-max-retries` 控制每段的 LLM 重译次数（默认 3）。
+- **`tts_aware`**（TTS 时长感知翻译，默认）：试合成 + 时长反馈循环，大部分差异在第 1 层就被消化，语音自然度更高。`--tts-aware-max-retries` 控制每段的 LLM 重译次数（默认 10）。
 
 > 💡 视频画面和背景音轨不再做任何拉伸，因此音频段必须严格等长，没有"允许误差"的概念。如对 LLM 重译次数有特殊要求可调 `--tts-aware-max-retries`。
 

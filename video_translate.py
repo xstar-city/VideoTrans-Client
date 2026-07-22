@@ -56,7 +56,7 @@ def process_video_pipeline(
     asr_mode: str = "precise",
     translation_models: str = "",
     translation_mode: str = "tts_aware",
-    tts_aware_max_retries: int = 3,
+    tts_aware_max_retries: int = 10,
     tts_max_audio_slowdown_pct: float = 0.2,
     tts_max_audio_speedup_pct: float = 0.2,
     tts_aware_min_candidate_count: int = 3,

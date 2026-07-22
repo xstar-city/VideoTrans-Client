@@ -202,7 +202,7 @@ def process_batch(
     detect_nonverbal_and_singing: bool = True,
     denoise: str = "aggressive",
     translation_models: str = "",
-    tts_aware_max_retries: int = 3,
+    tts_aware_max_retries: int = 10,
     extra_translation_guideline: str | None = None,
 ) -> None:
     """处理一批视频：提取音频 → 远程翻译 → 本地视频同步+合并。"""
@@ -353,8 +353,8 @@ def main():
                    help='翻译模型列表，以逗号分隔。')
     p.add_argument('--extra-translation-guideline',
                    help='包含额外翻译指南的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=3,
-                   help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 3）')
+    p.add_argument('--tts-aware-max-retries', type=int, default=10,
+                   help='TTS时长感知模式中每句的最大时长调整重试次数（默认: 10）')
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
                               help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
