@@ -41,6 +41,50 @@ from remote_client import resolve_server_arg
 
 
 # ============================================================
+# 辅助函数
+# ============================================================
+
+def _archive_task_after_pipeline(video_data: dict[Path, dict], server_url: str):
+    """在视频翻译流水线全部完成后，归档服务端任务到 US3。
+
+    从第一个视频的 .vt_task_id 文件读取 task_id，
+    通知服务端上传到 US3 并删除本地文件。
+    归档失败不影响已下载的翻译结果，仅打印警告。
+    """
+    if not video_data:
+        return
+    try:
+        from audio_translate import _load_task_id
+        from remote_client import RemoteScriptClient
+
+        first_video = next(iter(video_data))
+        task_id = _load_task_id(first_video)
+        if not task_id:
+            print("[归档] 未找到 task_id，跳过归档")
+            return
+
+        print(f"\n--- 归档任务到 US3 ---")
+        print(f"正在归档历史任务 (task_id={task_id})...")
+        client = RemoteScriptClient(server_url)
+        result = client.archive_task(task_id)
+        status = result.get("status", "unknown")
+        if status == "archived":
+            uploaded = result.get("uploaded", 0)
+            skipped = result.get("skipped", 0)
+            print(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
+            print(f"服务端本地文件已清理。")
+        elif status == "failed":
+            error_msg = result.get("error", "未知错误")
+            print(f"[警告] 归档失败：{error_msg}")
+            print(f"服务端本地文件已保留，后续可手动重试归档。")
+        else:
+            print(f"归档结果：{status}")
+    except Exception as e:
+        print(f"[警告] 归档请求失败：{e}")
+        print(f"服务端本地文件已保留，不影响已下载的翻译结果。")
+
+
+# ============================================================
 # 主流程
 # ============================================================
 
@@ -176,6 +220,9 @@ def process_video_pipeline(
         if new_task:
             audio_argv.append("--new-task")
 
+        # video_translate.py 在视频合并后自行归档，audio_translate 不自动归档
+        audio_argv.append("--no-archive")
+
         print(f"调用 audio_translate.py (server={server_url})...")
         # 临时替换 sys.argv 以直接调用 audio_translate.main()
         original_argv = sys.argv
@@ -184,8 +231,11 @@ def process_video_pipeline(
             from audio_translate import main as audio_translate_main
             audio_translate_main()
         except SystemExit as e:
-            # 退出码 130 = 被信号中断（Ctrl+C），属于主动取消，不报错
-            if e.code not in (0, 130, None):
+            # 退出码 130 = 被信号中断（Ctrl+C），属于主动取消，不报错但也不继续后续步骤
+            if e.code == 130:
+                sys.exit(130)
+            # 0 / None = 正常完成，继续 Step 3
+            if e.code not in (0, None):
                 print(f"[错误] audio_translate.py 返回非零退出码: {e.code}")
                 sys.exit(e.code)
         finally:
@@ -196,6 +246,7 @@ def process_video_pipeline(
     if stop_after_translation:
         print("\n--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
         print("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
+        _archive_task_after_pipeline(video_data, server_url)
         return
 
     print(f"\n--- Step 3: 合并音轨 ---")
@@ -243,6 +294,9 @@ def process_video_pipeline(
 
             except Exception as e:
                 print(f"[错误] 处理 {video_path.name} ({code}) 失败: {e}")
+
+    # 所有视频合并完成后，归档服务端任务到 US3
+    _archive_task_after_pipeline(video_data, server_url)
 
 
 # ============================================================

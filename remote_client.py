@@ -568,6 +568,67 @@ class RemoteScriptClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ─── 归档任务到 US3 ────────────────────────────────────
+
+    def archive_task(self, task_id: str, timeout: float = 1800.0) -> dict:
+        """通知服务端将任务归档到 US3，上传后删除服务端本地文件。
+
+        此方法应在客户端下载并校验完所有文件后调用，
+        作为翻译任务的最后一个步骤。
+
+        参数:
+            task_id: 任务 ID
+            timeout: 单次请求超时（秒），默认 1800（30 分钟），
+                     大任务目录上传可能需要较长时间
+
+        返回:
+            {"task_id": "...", "status": "archived"|"failed", ...}
+            status="archived" 表示上传成功且本地已删除
+            status="failed" 表示上传失败，本地文件保留（local_preserved=True）
+
+        异常:
+            requests.HTTPError: 服务端返回 404（任务不存在）或 503（US3 未配置）
+        """
+        resp = requests.post(
+            f"{self.base_url}/archive/{task_id}",
+            headers=self._headers(),
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    # ─── 从 US3 恢复任务 ──────────────────────────────────
+
+    def restore_task(self, task_id: str, timeout: float = 1800.0) -> dict | None:
+        """从 US3 恢复任务到服务端本地工作目录。
+
+        如果服务端本地已存在任务目录，直接返回（无需恢复）。
+        如果 US3 上存在，下载到服务端本地。
+        如果都不存在，返回 None。
+
+        参数:
+            task_id: 任务 ID
+            timeout: 单次请求超时（秒），默认 1800（30 分钟）
+
+        返回:
+            恢复结果 dict，或 None（任务在本地和 US3 均不存在）
+
+        异常:
+            requests.HTTPError: 服务端返回 503（US3 未配置）或其他非 404 错误
+        """
+        try:
+            resp = requests.post(
+                f"{self.base_url}/restore/{task_id}",
+                headers=self._headers(),
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+
     # ─── 便捷方法：上传 → 执行 → 等待 ──────────────────────
 
     def run_with_files(self, script: str, args: list[str],

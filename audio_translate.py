@@ -639,7 +639,10 @@ def main():
                    help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
                         '核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。')
-                   
+    p.add_argument('--no-archive', action='store_true',
+                   help='不自动归档任务到 US3。由调用方（如 video_translate.py）在后续步骤完成后手动归档。'
+                        '独立使用 audio_translate.py 时无需指定此参数，默认在同步校验完成后归档。')
+
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
                               help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
@@ -695,7 +698,31 @@ def main():
                 # 校验输入文件与历史任务是否一致（防止换视频导致中间结果覆盖）
                 _validate_input_files_match(client, task_id, input_paths)
             else:
-                _exit_task_not_found(task_id, input_paths)
+                # 本地不存在，尝试从 US3 归档恢复
+                print(f"本地未找到任务 task_id={task_id}，正在从 US3 归档恢复...")
+                restore_result = client.restore_task(task_id)
+                if restore_result is not None:
+                    status = restore_result.get("status", "unknown")
+                    if status == "already_local":
+                        print(f"  US3 无归档数据，任务目录已存在于本地，直接复用")
+                    elif status == "restored":
+                        downloaded = restore_result.get("downloaded", 0)
+                        skipped = restore_result.get("skipped", 0)
+                        failed = restore_result.get("failed", 0)
+                        print(f"  US3 归档恢复完成：下载 {downloaded} 个文件，跳过 {skipped} 个已存在文件")
+                        if failed > 0:
+                            print(f"  [警告] 有 {failed} 个文件下载失败，断点续跑可能不完整")
+                    else:
+                        print(f"  US3 归档恢复结果：{status}")
+
+                    # 恢复后验证任务目录确实可用
+                    if not client.task_exists(task_id):
+                        print(f"[错误] US3 恢复后任务目录仍不存在，无法继续")
+                        sys.exit(1)
+                    print(f"复用该任务继续跑...")
+                    _validate_input_files_match(client, task_id, input_paths)
+                else:
+                    _exit_task_not_found(task_id, input_paths)
 
     # ── 1. 上传音频文件 ──────────────────────────────────────
     # 老 task_id 时先查询服务端已有文件，size 一致则跳过上传
@@ -942,6 +969,30 @@ def main():
     hours, mins = divmod(mins, 60)
     print(f"所有文件同步完成，客户端与服务端文件一一对应。")
     print(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
+
+    # ── 7. 归档任务到 US3（可选）──────────────────────────
+    # 客户端已下载并校验完所有文件后，通知服务端上传到 US3 并删除本地文件
+    # --no-archive 时跳过（由调用方如 video_translate.py 在后续步骤后手动归档）
+    if not args.no_archive:
+        print(f"\n--- Step 7: 归档任务到 US3 ---")
+        print(f"正在归档历史任务 (task_id={task_id})...")
+        try:
+            archive_result = client.archive_task(task_id)
+            archive_status = archive_result.get("status", "unknown")
+            if archive_status == "archived":
+                uploaded = archive_result.get("uploaded", 0)
+                skipped = archive_result.get("skipped", 0)
+                print(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
+                print(f"服务端本地文件已清理。")
+            elif archive_status == "failed":
+                error_msg = archive_result.get("error", "未知错误")
+                print(f"[警告] 归档失败：{error_msg}")
+                print(f"服务端本地文件已保留，后续可手动重试归档。")
+            else:
+                print(f"归档结果：{archive_status}")
+        except Exception as e:
+            print(f"[警告] 归档请求失败：{e}")
+            print(f"服务端本地文件已保留，不影响已下载的翻译结果。")
 
 
 if __name__ == '__main__':
