@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""开源版视频翻译入口：本地提取音频 → 远程翻译 → 本地视频音轨替换。
+"""开源版视频翻译入口：本地提取音频 -> 远程翻译 -> 本地视频音轨替换。
 
 与 audio_translate.py 的纯远程调用模式不同，视频翻译采用
 "本地视频操作 + 远程音频翻译" 的混合架构，避免上传大视频文件。
@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -31,8 +33,9 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.config import FINAL_AUDIO_FILENAME, build_segments_dir
 from Common.language_map import get_language_dir_name, normalize_target_language_codes
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
+from Common.config import build_compressed_upload_path, build_translated_output_path
 from Common.video_utils import (
-    build_translated_output_path,
+    compress_video_for_upload,
     detect_gpu_available,
     extract_audio_ffmpeg,
     mux_audio_into_video,
@@ -43,6 +46,12 @@ from remote_client import resolve_server_arg
 # ============================================================
 # 辅助函数
 # ============================================================
+
+def _log(msg: str):
+    """带时间戳的日志输出，用于关键节点。"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}", flush=True)
+
 
 def _archive_task_after_pipeline(video_data: dict[Path, dict], server_url: str):
     """在视频翻译流水线全部完成后，归档服务端任务到 US3。
@@ -63,22 +72,22 @@ def _archive_task_after_pipeline(video_data: dict[Path, dict], server_url: str):
             print("[归档] 未找到 task_id，跳过归档")
             return
 
-        print(f"\n--- 归档任务到 US3 ---")
-        print(f"正在归档历史任务 (task_id={task_id})...")
+        _log(f"--- 归档任务到 US3 ---")
+        _log(f"正在归档历史任务 (task_id={task_id})...")
         client = RemoteScriptClient(server_url)
         result = client.archive_task(task_id)
         status = result.get("status", "unknown")
         if status == "archived":
             uploaded = result.get("uploaded", 0)
             skipped = result.get("skipped", 0)
-            print(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
-            print(f"服务端本地文件已清理。")
+            _log(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
+            _log(f"服务端本地文件已清理。")
         elif status == "failed":
             error_msg = result.get("error", "未知错误")
             print(f"[警告] 归档失败：{error_msg}")
             print(f"服务端本地文件已保留，后续可手动重试归档。")
         else:
-            print(f"归档结果：{status}")
+            _log(f"归档结果：{status}")
     except Exception as e:
         print(f"[警告] 归档请求失败：{e}")
         print(f"服务端本地文件已保留，不影响已下载的翻译结果。")
@@ -110,7 +119,7 @@ def process_video_pipeline(
     stop_after_translation: bool = False,
     new_task: bool = False,
 ):
-    """视频翻译主流程：提取音频 → 远程翻译 → 本地原视频画面 + 新音轨 mux。
+    """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
 
     设计约束（"禁止伸缩"简化）：
         - 视频画面保持原速：不切分、不调速、不重新合并
@@ -118,22 +127,24 @@ def process_video_pipeline(
         - 客户端只需把 final.mp3 mux 进原视频即可
 
     上传策略：
-        - enable_visual_diarization=False（默认）：本地 ffmpeg 抽 mp3 → 上传 mp3 给服务端，
+        - enable_visual_diarization=False（默认）：本地 ffmpeg 抽 mp3 -> 上传 mp3 给服务端，
           节省上传带宽（mp3 体积 ~ mp4 视频流的 1/10）。
-        - enable_visual_diarization=True：跳过本地抽音频，直接上传完整 mp4，
+        - enable_visual_diarization=True：本地压缩视频到 480p/25fps -> 上传压缩版给服务端，
           供服务端在 diarization 阶段结合视觉信号辅助说话人切分。
+          压缩策略：短边 480px（与 S3FD minDetSize 对齐）、25fps、CRF 30，
+          体积约为原版的 1/5~1/10。最终合成视频仍使用本地高清原版。
     """
     use_gpu = detect_gpu_available()
     gpu_status = "GPU 加速" if use_gpu else "CPU 模式"
     upload_mode = "上传视频" if enable_visual_diarization else "上传音频"
-    print(f"\n处理 {len(video_paths)} 个视频文件... ({upload_mode}; 音轨合并: {gpu_status})")
+    _log(f"处理 {len(video_paths)} 个视频文件... ({upload_mode}; 音轨合并: {gpu_status})")
 
     target_codes = normalize_target_language_codes(targets)
 
     # ── Step 1: 准备上传素材 ───────────────────────────────
-    # - 默认走"本地抽 mp3 → 上传 mp3"路径，省带宽
+    # - 默认走"本地抽 mp3 -> 上传 mp3"路径，省带宽
     # - 开启 enable_visual_diarization 则直接上传 mp4，让服务端在 diarization 阶段使用视觉信息
-    print("\n--- Step 1: 准备上传素材 ---")
+    _log("--- Step 1: 准备上传素材 ---")
     video_data: dict[Path, dict] = {}
 
     for video_path in video_paths:
@@ -152,6 +163,36 @@ def process_video_pipeline(
                     except OSError as e:
                         print(f"[警告] 无法删除 {out_video.name}: {e}")
 
+        # 新任务模式：删除所有本地中间结果和输出，强制从头开始
+        if new_task:
+            # 删除已翻译的输出视频（使跳过检查通过）
+            for code in target_codes:
+                out_video = build_translated_output_path(video_path, video_path, code)
+                if out_video.exists():
+                    try:
+                        out_video.unlink()
+                        print(f"[新任务] 删除已翻译视频: {out_video.name}")
+                    except OSError as e:
+                        print(f"[警告] 无法删除 {out_video.name}: {e}")
+
+            # 删除 segments 目录（ASR / TTS / 翻译等所有中间结果）
+            segments_dir = build_segments_dir(video_path)
+            if segments_dir.exists():
+                try:
+                    shutil.rmtree(segments_dir)
+                    print(f"[新任务] 删除中间结果目录: {segments_dir.name}/")
+                except OSError as e:
+                    print(f"[警告] 无法删除 {segments_dir.name}: {e}")
+
+            # 删除 .vt_task_id 文件（强制服务端创建新任务）
+            task_id_file = video_path.parent / ".vt_task_id"
+            if task_id_file.exists():
+                try:
+                    task_id_file.unlink()
+                    print(f"[新任务] 删除任务ID文件: {task_id_file.name}")
+                except OSError as e:
+                    print(f"[警告] 无法删除 {task_id_file.name}: {e}")
+
         # 检查是否所有目标语言的视频都已存在
         if all(
             build_translated_output_path(video_path, video_path, code).exists()
@@ -161,9 +202,25 @@ def process_video_pipeline(
             continue
 
         if enable_visual_diarization:
-            # 直接以 mp4 作为上传对象
-            video_data[video_path] = {"upload": video_path}
-            print(f"视觉 diarization 已启用，将直接上传视频: {video_path.name}")
+            # 压缩视频后上传（短边 480p / 25fps / CRF 30），节省上传带宽
+            # 最终合成视频仍使用本地高清原版（Step 3 中 mux 使用 video_path）
+            compressed_path = build_compressed_upload_path(video_path)
+            if compressed_path.exists():
+                print(f"压缩视频已存在: {compressed_path.name}，跳过压缩。")
+            else:
+                try:
+                    print(f"压缩视频到 480p: {video_path.name}...")
+                    compress_video_for_upload(
+                        video_path, compressed_path, use_gpu=use_gpu,
+                    )
+                    orig_size = video_path.stat().st_size / (1024 * 1024)
+                    comp_size = compressed_path.stat().st_size / (1024 * 1024)
+                    print(f"压缩完成: {orig_size:.1f}MB -> {comp_size:.1f}MB")
+                except Exception as e:
+                    print(f"压缩视频失败 {video_path}: {e}，回退到上传原视频")
+                    compressed_path = video_path
+            video_data[video_path] = {"upload": compressed_path}
+            print(f"视觉 diarization 已启用，将上传压缩视频: {compressed_path.name}")
         else:
             # 默认行为：本地抽 mp3
             mp3_path = video_path.with_suffix(".mp3")
@@ -181,7 +238,7 @@ def process_video_pipeline(
 
     # ── Step 2: 远程音频翻译（直接调用 audio_translate.main()）──
     # 注意：不使用 subprocess，否则 Windows 下 Ctrl+C 无法传递给子进程
-    print("\n--- Step 2: 远程音频翻译 ---")
+    _log("--- Step 2: 远程音频翻译 ---")
     upload_paths = [data["upload"] for data in video_data.values()]
 
     if upload_paths:
@@ -210,6 +267,15 @@ def process_video_pipeline(
 
         if enable_visual_diarization:
             audio_argv.append("--enable-visual-diarization")
+            # 构建上传文件名映射：压缩视频用原文件名上传，保持服务端 stem 一致
+            upload_as_map = {}
+            for video_path, data in video_data.items():
+                upload_path = data["upload"]
+                if upload_path != video_path:
+                    upload_as_map[str(upload_path)] = video_path.name
+            if upload_as_map:
+                import json
+                audio_argv.extend(["--upload-as", json.dumps(upload_as_map, ensure_ascii=False)])
 
         if edit_rerun:
             audio_argv.append("--edit-rerun")
@@ -223,7 +289,7 @@ def process_video_pipeline(
         # video_translate.py 在视频合并后自行归档，audio_translate 不自动归档
         audio_argv.append("--no-archive")
 
-        print(f"调用 audio_translate.py (server={server_url})...")
+        _log(f"调用 audio_translate.py (server={server_url})...")
         # 临时替换 sys.argv 以直接调用 audio_translate.main()
         original_argv = sys.argv
         sys.argv = ["audio_translate.py"] + audio_argv
@@ -244,16 +310,16 @@ def process_video_pipeline(
     # ── Step 3: 合并音轨（视频画面保持原速，不做任何切分/调速）──────────
     # stop_after_translation 模式下没有 final.mp3，跳过音轨合并
     if stop_after_translation:
-        print("\n--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
-        print("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
+        _log("--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
+        _log("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
         _archive_task_after_pipeline(video_data, server_url)
         return
 
-    print(f"\n--- Step 3: 合并音轨 ---")
+    _log("--- Step 3: 合并音轨 ---")
 
     # 合成前同步检查：确保本地文件与服务端一致（所有模式统一执行）
     # 防止服务端重新生成的文件（如 combined.mp3/final.mp3）未被下载到本地
-    print("合成前文件同步检查...")
+    _log("合成前文件同步检查...")
     try:
         from remote_client import RemoteScriptClient
         from audio_translate import _sync_files, _compute_dest_dir, _load_task_id
@@ -268,7 +334,7 @@ def process_video_pipeline(
         print(f"  [警告] 合成前文件同步检查失败: {e}")
 
     for code in target_codes:
-        print(f"\n处理语言: {code}")
+        _log(f"处理语言: {code}")
         for video_path, data in list(video_data.items()):
             try:
                 out_video = build_translated_output_path(video_path, video_path, code)
@@ -288,9 +354,9 @@ def process_video_pipeline(
                     continue
 
                 # 视频不做任何伸缩，直接 mux
-                print(f"  合并音轨: {video_path.name} + {final_audio.name} → {out_video.name}...")
+                _log(f"  合并音轨: {video_path.name} + {final_audio.name} -> {out_video.name}...")
                 mux_audio_into_video(video_path, final_audio, out_video)
-                print(f"  翻译视频已保存: {out_video}")
+                _log(f"  翻译视频已保存: {out_video}")
 
             except Exception as e:
                 print(f"[错误] 处理 {video_path.name} ({code}) 失败: {e}")
@@ -308,7 +374,7 @@ def process_video_pipeline(
 DEFAULT_MODELS = ['doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'doubao-seed-2-1-pro', 'gemini-3.5-flash']
 
 def main():
-    p = argparse.ArgumentParser(description="视频翻译：提取音频 → 远程翻译 → 本地视频同步")
+    p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")
     p.add_argument("inputs", nargs="+", help="本地视频文件路径列表（如 一个或者多个mp4）。")
     p.add_argument('--target', '-t', dest='targets', nargs='+', default=['en'], choices=ALL_TTS_LANGUAGE_CODES, help='要翻译输出的目标语言代码，默认：en（English）')
     p.add_argument('--source', '-s', default='zh', choices=ALL_ASR_LANGUAGE_CODES, help='输入音频的源语言代码（例如 en, zh），默认：zh（普通话，也支持中国方言），一般中文和英文视频，此参数可不管')
@@ -324,8 +390,8 @@ def main():
     p.add_argument('--enable-visual-diarization', '-v', action=argparse.BooleanOptionalAction, default=False,
                    help='是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭。'
                         '关闭时本地抽 mp3 上传服务端（带宽友好）；'
-                        '开启时直接上传完整 mp4，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
-                        '视觉信号辅助说话人切分。')
+                        '开启时本地压缩视频到 480p/25fps 后上传，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
+                        '视觉信号辅助说话人切分。最终合成视频仍使用本地高清原版。')
 
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
@@ -352,9 +418,9 @@ def main():
                    help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
                         '核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。')
-    p.add_argument('--new-task', action='store_true',
-                   help='忽略本地保存的 task_id，强制创建新任务。'
-                        '当 .vt_task_id 文件指向的任务不在当前服务器时使用。')
+    p.add_argument('--new-task', '-n', action='store_true',
+                   help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
+                        '在服务端创建全新任务。用于需要完全重跑的场景。')
 
     
     args = p.parse_args()

@@ -9,7 +9,7 @@
 断点续跑（task_id 机制）：
     客户端与服务端为一对一模式：一个 task_id 对应一个固定的工作目录。
     上传音频后，会在第一个音频文件所在目录生成 .vt_task_id 文件记录 task_id。
-    再次运行时（同一音频目录），脚本自动读取该文件，复用老 task_id 重新执行脚本——
+    再次运行时（同一音频目录），脚本自动读取该文件，复用老 task_id 重新执行脚本--
     效果等价于登录服务器在同一目录下重新跑命令：服务端工作目录不变，
     audio_translate.py 内部的缓存检查机制会自动跳过已完成的步骤（ASR、翻译、TTS 等），
     只执行之前失败或未完成的步骤，实现断点续跑。
@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -36,6 +38,12 @@ from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from remote_client import RemoteScriptClient, resolve_server_arg
 
 from edit_rerun import preprocess_edit_rerun
+
+
+def _log(msg: str):
+    """带时间戳的日志输出，用于关键节点。"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}", flush=True)
 
 
 # ─── task_id 持久化 ───────────────────────────────────────
@@ -98,7 +106,7 @@ def _validate_task_ids(input_paths: list[Path]) -> str | None:
             f"  task_id={tid}: {', '.join(dirs)}"
             for tid, dirs in id_dirs.items()
         )
-        print("[错误] 不同视频目录下的 .vt_task_id 不一致，不能混合执行！")
+        _log("[错误] 不同视频目录下的 .vt_task_id 不一致，不能混合执行！")
         print(f"  这些视频曾在不同任务中运行过，请先删除不需要的 .vt_task_id 文件：")
         print(details)
         sys.exit(1)
@@ -107,7 +115,7 @@ def _validate_task_ids(input_paths: list[Path]) -> str | None:
     the_id = unique_ids.pop()
     missing_dirs = [k for k, v in dir_task_ids.items() if v is None]
     if missing_dirs:
-        print("[错误] 部分视频目录缺少 .vt_task_id，不能混合执行！")
+        _log("[错误] 部分视频目录缺少 .vt_task_id，不能混合执行！")
         print(f"  task_id={the_id} 存在于部分目录，但以下目录没有：")
         for d in missing_dirs:
             print(f"    {d}")
@@ -123,7 +131,7 @@ def _exit_task_not_found(task_id: str, input_paths: list[Path]):
 
     说明该任务的历史记录不在此服务器上（workspace 可能已被清理或此为另一台服务器）。
     """
-    print(f"[错误] 已保存的 task_id={task_id} 在服务端不存在。")
+    _log(f"[错误] 已保存的 task_id={task_id} 在服务端不存在。")
     print(f"  该任务的历史记录不在此服务器上（workspace 可能已被清理或此为另一台服务器）。")
     print(f"  解决方法：")
     print(f"    1. 删除以下 .vt_task_id 文件后重试：")
@@ -135,18 +143,24 @@ def _exit_task_not_found(task_id: str, input_paths: list[Path]):
 
 
 def _validate_input_files_match(client: RemoteScriptClient, task_id: str,
-                                 input_paths: list[Path]):
+                                 input_paths: list[Path],
+                                 upload_as_map: dict[str, str] | None = None):
     """校验当前输入文件与服务端历史任务是否一致。
 
     如果服务端已有不同的媒体文件，说明用户在同一个 task_id 下换了视频/音频文件，
     会导致翻译中间结果互相覆盖。此时应报错退出。
 
     匹配规则（按文件名 stem 比较，不比较扩展名）：
-      - stem 完全相同 → 同一源文件（如之前上传 .mp3，现在上传 .mp4）
-      - 服务端文件 stem 以 "{input_stem}_" 开头 → 流水线派生文件
+      - stem 完全相同 -> 同一源文件（如之前上传 .mp3，现在上传 .mp4）
+      - 服务端文件 stem 以 "{input_stem}_" 开头 -> 流水线派生文件
         （如 {stem}_vocals.mp3、{stem}_others.mp3、{stem}_vocals_denoised.mp3）
-      - 以上都不匹配，且服务端有其他媒体文件 → 不同源，报错
+      - 以上都不匹配，且服务端有其他媒体文件 -> 不同源，报错
+
+    注意：当 --upload-as 映射存在时（如视觉 diarization 压缩视频用原文件名上传），
+    使用映射后的服务端文件名 stem 做匹配，而非本地文件名。
     """
+    if upload_as_map is None:
+        upload_as_map = {}
     media_exts = {'.mp3', '.mp4', '.wav', '.m4a', '.flac', '.aac', '.ogg'}
     for input_path in input_paths:
         p = Path(input_path)
@@ -159,10 +173,12 @@ def _validate_input_files_match(client: RemoteScriptClient, task_id: str,
             # 子目录不存在，跳过检查（可能是新目录）
             continue
 
-        input_stem = p.stem
+        # 使用映射后的服务端文件名 stem 做匹配（如压缩视频 _upload_480p -> 原文件名）
+        server_name = upload_as_map.get(str(p), p.name)
+        input_stem = Path(server_name).stem
         server_stems = {Path(f).stem for f in server_files}
 
-        # 同一源文件（扩展名可能不同，如 mp3 → mp4）
+        # 同一源文件（扩展名可能不同，如 mp3 -> mp4）
         if input_stem in server_stems:
             continue
 
@@ -174,8 +190,8 @@ def _validate_input_files_match(client: RemoteScriptClient, task_id: str,
         server_media = {f for f in server_files
                        if Path(f).suffix.lower() in media_exts}
         if server_media:
-            print(f"[错误] 输入文件与历史任务不匹配！")
-            print(f"  当前输入: {dest_dir}/{p.name}")
+            _log(f"[错误] 输入文件与历史任务不匹配！")
+            print(f"  当前输入: {dest_dir}/{server_name}")
             print(f"  服务端历史文件: {', '.join(sorted(server_media))}")
             print(f"  task_id={task_id} 对应的任务使用的是不同的视频/音频文件。")
             print(f"  每次任务的视频/音频文件必须在独立文件夹下，")
@@ -186,17 +202,12 @@ def _validate_input_files_match(client: RemoteScriptClient, task_id: str,
 
 
 
-
-
-
-
-
 # ─── 辅助函数 ─────────────────────────────────────────────
 
 def _compute_dest_dir(file_path: Path) -> str:
     """计算文件在服务端工作目录中的子目录名（直接用父目录名）。
 
-    例如：E:\\...\\《逐玉》\\1.mp3 → "《逐玉》"
+    例如：E:\\...\\《逐玉》\\1.mp3 -> "《逐玉》"
 
     多输入时，调用方应先通过 _validate_unique_parent_dirs 校验
     各输入文件的父目录名不重复，否则 segments 目录会冲突。
@@ -220,7 +231,7 @@ def _validate_independent_dirs(input_paths: list[Path]):
 
     multi_file_dirs = {d: fps for d, fps in dir_to_files.items() if len(fps) > 1}
     if multi_file_dirs:
-        print('[错误] 以下目录中包含多个输入文件，违反"每个视频/音频独立目录"规则：')
+        _log('[错误] 以下目录中包含多个输入文件，违反"每个视频/音频独立目录"规则：')
         for dir_path, fps in multi_file_dirs.items():
             print(f"  目录: {dir_path}")
             for fp in fps:
@@ -254,7 +265,7 @@ def _validate_unique_parent_dirs(input_paths: list[Path]):
 
     duplicates = {name: paths for name, paths in name_to_paths.items() if len(paths) > 1}
     if duplicates:
-        print("[错误] 多个输入文件的目录名重复，服务端子目录会冲突，segments 结果将互相覆盖！")
+        _log("[错误] 多个输入文件的目录名重复，服务端子目录会冲突，segments 结果将互相覆盖！")
         for name, paths in duplicates.items():
             print(f"  目录名 \"{name}\":")
             for p in paths:
@@ -272,18 +283,24 @@ def _compute_video_summary(file_paths: list[Path]) -> str:
     """计算视频名称摘要，用于 dashboard 展示。
 
     单文件：最后3层父路径，如 Demo\\多语种翻译\\《逐玉》
-    多文件(>2)：前2个 + ...等N个
+    多文件：公共父目录的最后3层 + 数量，如 10部测试\\测试\\ (30个视频)
     """
     def _single_summary(p: Path) -> str:
         parts = p.resolve().parent.parts
         return "\\".join(parts[-3:]) if len(parts) >= 3 else "\\".join(parts)
 
-    summaries = [_single_summary(p) for p in file_paths]
-    if len(summaries) == 1:
-        return summaries[0]
-    if len(summaries) <= 2:
-        return ", ".join(summaries)
-    return f"{summaries[0]}, {summaries[1]}, ...等{len(summaries)}个"
+    if len(file_paths) == 1:
+        return _single_summary(file_paths[0])
+
+    # 多文件：取公共父目录
+    resolved = [p.resolve() for p in file_paths]
+    common = Path(os.path.commonpath(resolved))
+    # 如果公共路径就是某个文件的父目录（如所有文件在同一目录），再上一层更有辨识度
+    if common == resolved[0].parent:
+        common = common.parent
+    parts = common.parts
+    short_dir = "\\".join(parts[-3:]) if len(parts) >= 3 else "\\".join(parts)
+    return f"{short_dir} ({len(file_paths)}个视频)"
 
 
 def _find_matching_srt(audio_path: Path) -> Path | None:
@@ -294,24 +311,31 @@ def _find_matching_srt(audio_path: Path) -> Path | None:
             return srt_path
     return None
 
-
-
-
-
-
-
-
-
-
 def _build_remote_args(args) -> list[str]:
-    """将客户端参数转换为服务端脚本的命令行参数。"""
-    remote_args = []
+    """将客户端参数转换为服务端脚本的命令行参数。
 
-    # 音频文件名（含子目录路径，服务端 cwd 为 workspace/{task_id}/）
+    大批量文件（>20）时，将服务端相对路径写入 _remote_input_list.txt，
+    通过 --file-list 传给服务端，避免命令行过长（Windows 32K 限制）。
+    """
+    remote_args = []
+    upload_as_map: dict[str, str] = getattr(args, '_upload_as_map', {})
+
+    # 构建服务端相对路径列表
+    server_paths: list[str] = []
     for input_path in args.inputs:
         p = Path(input_path)
         dest_dir = _compute_dest_dir(p)
-        remote_args.append(f"{dest_dir}/{p.name}")
+        # 若提供了 --upload-as 映射，用映射的服务端文件名（保持 stem 一致）
+        server_name = upload_as_map.get(str(p), p.name)
+        server_paths.append(f"{dest_dir}/{server_name}")
+
+    # 大批量时写文件列表，避免服务端命令行过长
+    if len(server_paths) > 20:
+        list_file = Path(args.inputs[0]).parent / "_remote_input_list.txt"
+        list_file.write_text("\n".join(server_paths), encoding="utf-8")
+        remote_args.extend(["--file-list", list_file.name])
+    else:
+        remote_args.extend(server_paths)
 
     # 目标语言
     if args.targets:
@@ -454,10 +478,10 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 latest_mtime = sub_latest
         else:
             # 下载文件（size + mtime + hash 三级对比，避免重复下载）
-            # 对比优先级：size → mtime → hash
+            # 对比优先级：size -> mtime -> hash
             # mtime 检查：服务端重新生成文件后（如 edit-rerun 触发 TTS 重合成），
             # 即使 size 不变也能检测到并重新下载。但 mtime 受客户端/服务端时间差影响，
-            # 可能误判 → hash 兜底：size 相同且 hash 相同则跳过，无论 mtime 如何。
+            # 可能误判 -> hash 兜底：size 相同且 hash 相同则跳过，无论 mtime 如何。
             local_file = local_dir / name
             remote_path = f"{sub_dir}/{name}" if sub_dir else name
             remote_size = item.get("size", -1)
@@ -469,7 +493,7 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                     if local_stat.st_size == remote_size:
                         # size 匹配，检查 mtime
                         if remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
-                            # mtime 提示服务端文件更新，但可能是时间波动 → hash 兜底
+                            # mtime 提示服务端文件更新，但可能是时间波动 -> hash 兜底
                             if remote_hash:
                                 local_hash = _compute_file_hash(local_file)
                                 if local_hash == remote_hash:
@@ -532,7 +556,7 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
                     if local_stat.st_size != remote_size:
                         missing.append(f"{remote_path} (大小不匹配: 本地{local_stat.st_size} vs 服务端{remote_size})")
                     elif remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
-                        # size 匹配但 mtime 不同，可能是时间波动 → hash 兜底
+                        # size 匹配但 mtime 不同，可能是时间波动 -> hash 兜底
                         if remote_hash:
                             local_hash = _compute_file_hash(local_file)
                             if local_hash == remote_hash:
@@ -549,8 +573,8 @@ def _find_local_only_files(
 ) -> list[str]:
     """检查本地存在但服务端不存在的同步管理文件（.mp3/.txt/.srt）。
 
-    与 _verify_sync 互补：_verify_sync 检查"服务端→本地"方向（服务端有的文件本地是否也有），
-    此函数检查"本地→服务端"方向（本地有的文件服务端是否也有）。
+    与 _verify_sync 互补：_verify_sync 检查"服务端->本地"方向（服务端有的文件本地是否也有），
+    此函数检查"本地->服务端"方向（本地有的文件服务端是否也有）。
 
     返回多余本地文件的相对路径列表。
     """
@@ -654,17 +678,28 @@ def main():
                    help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
                         '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
                         '要求服务端已有该任务的运行记录。')
+    # 内部参数：仅供 video_translate.py 传入，指定本地路径到服务端文件名的映射（JSON）。
+    # 用于视觉 diarization 模式：本地压缩为 _upload_480p.mp4，但上传时用原文件名，保持 stem 一致。
+    p.add_argument('--upload-as', default=None, help=argparse.SUPPRESS)
     # 内部参数：仅供客户端 video_translate.py 透传给服务端；不在 --help 中展示，
     # 终端用户不应通过 audio_translate 的命令行使用此开关（它要求输入是视频，与音频翻译入口职责冲突）。
     args = p.parse_args()
 
     task_start_time = time.time()
 
+    # 解析 --upload-as 映射：本地路径 -> 服务端文件名
+    # 用于视觉 diarization 模式：本地压缩为 _upload_480p.mp4，上传时用原文件名保持 stem 一致
+    upload_as_map: dict[str, str] = {}
+    if args.upload_as:
+        import json
+        upload_as_map = json.loads(args.upload_as)
+    args._upload_as_map = upload_as_map
+
     # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
     try:
         server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
     except (ConnectionError, RuntimeError) as e:
-        print(f"[错误] {e}")
+        _log(f"[错误] {e}")
         sys.exit(1)
     client = RemoteScriptClient(server_url)
 
@@ -672,7 +707,7 @@ def main():
     try:
         client.check_server()
     except ConnectionError as e:
-        print(f"[错误] {e}")
+        _log(f"[错误] {e}")
         sys.exit(1)
 
     first_input = Path(args.inputs[0])
@@ -694,12 +729,12 @@ def main():
         task_id = _validate_task_ids(input_paths)
         if task_id:
             if client.task_exists(task_id):
-                print(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
+                _log(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
                 # 校验输入文件与历史任务是否一致（防止换视频导致中间结果覆盖）
-                _validate_input_files_match(client, task_id, input_paths)
+                _validate_input_files_match(client, task_id, input_paths, upload_as_map)
             else:
                 # 本地不存在，尝试从 US3 归档恢复
-                print(f"本地未找到任务 task_id={task_id}，正在从 US3 归档恢复...")
+                _log(f"本地未找到任务 task_id={task_id}，正在从 US3 归档恢复...")
                 restore_result = client.restore_task(task_id)
                 if restore_result is not None:
                     status = restore_result.get("status", "unknown")
@@ -709,7 +744,7 @@ def main():
                         downloaded = restore_result.get("downloaded", 0)
                         skipped = restore_result.get("skipped", 0)
                         failed = restore_result.get("failed", 0)
-                        print(f"  US3 归档恢复完成：下载 {downloaded} 个文件，跳过 {skipped} 个已存在文件")
+                        _log(f"US3 归档恢复完成：下载 {downloaded} 个文件，跳过 {skipped} 个已存在文件")
                         if failed > 0:
                             print(f"  [警告] 有 {failed} 个文件下载失败，断点续跑可能不完整")
                     else:
@@ -717,10 +752,10 @@ def main():
 
                     # 恢复后验证任务目录确实可用
                     if not client.task_exists(task_id):
-                        print(f"[错误] US3 恢复后任务目录仍不存在，无法继续")
+                        _log(f"[错误] US3 恢复后任务目录仍不存在，无法继续")
                         sys.exit(1)
-                    print(f"复用该任务继续跑...")
-                    _validate_input_files_match(client, task_id, input_paths)
+                    _log(f"复用该任务继续跑...")
+                    _validate_input_files_match(client, task_id, input_paths, upload_as_map)
                 else:
                     _exit_task_not_found(task_id, input_paths)
 
@@ -752,43 +787,74 @@ def main():
             except Exception:
                 pass  # 子目录不存在时不阻断，走全量上传
 
+    # 上传进度跟踪
+    upload_start_time = time.time()
+    upload_count = 0
+    skip_count = 0
+    upload_bytes = 0
+    last_progress_time = time.time()
+    _PROGRESS_INTERVAL = 10.0  # 秒
+
+    def _check_upload_progress():
+        """每 10 秒打印一次上传进度，避免大量文件时刷屏。"""
+        nonlocal last_progress_time
+        now = time.time()
+        if now - last_progress_time >= _PROGRESS_INTERVAL:
+            total = upload_count + skip_count
+            print(f"  [上传进度] 已处理 {total} 个文件 (上传 {upload_count}, 跳过 {skip_count}), "
+                  f"已上传 {upload_bytes / (1024 * 1024):.0f}MB")
+            last_progress_time = now
+
     for input_path in args.inputs:
         path = Path(input_path)
         if not path.exists():
-            print(f"文件不存在: {path}")
+            _log(f"文件不存在: {path}")
             sys.exit(1)
 
         dest_dir = _compute_dest_dir(path)
-        dest_path = f"{dest_dir}/{path.name}"
+        # 若提供了 --upload-as 映射，用映射的服务端文件名（保持 stem 一致）
+        server_name = upload_as_map.get(str(path), path.name)
+        dest_path = f"{dest_dir}/{server_name}"
 
         local_size = path.stat().st_size
         remote_size = existing_remote_files.get(dest_path)
         if remote_size is not None and remote_size == local_size:
-            print(f"服务端已存在相同文件，跳过上传: {dest_path}")
+            skip_count += 1
+            _check_upload_progress()
             continue
 
         file_size_mb = local_size / (1024 * 1024)
         print(f"上传: {dest_path} ({file_size_mb:.1f} MB)...")
         result = client.upload(path, task_id=task_id, dest_path=dest_path)
         task_id = result["task_id"]
-        print(f"  已上传, task_id={task_id}")
+        upload_count += 1
+        upload_bytes += local_size
+        _check_upload_progress()
 
     # 持久化 task_id（保存到所有输入文件所在目录）
     _save_task_id_all(input_paths, task_id)
 
     # ── 2. 自动发现并上传同名 SRT 和翻译指南 ──────────────
     for input_path in args.inputs:
-        srt_path = _find_matching_srt(Path(input_path))
+        path = Path(input_path)
+        # 若有 --upload-as 映射（压缩视频用原文件名上传），用原文件名查找 SRT
+        server_name = upload_as_map.get(str(path), path.name)
+        srt_lookup_path = path.with_name(server_name)
+        srt_path = _find_matching_srt(srt_lookup_path)
         if srt_path:
             dest_dir = _compute_dest_dir(Path(input_path))
             srt_dest = f"{dest_dir}/{srt_path.name}"
             local_size = srt_path.stat().st_size
             remote_size = existing_remote_files.get(srt_dest)
             if remote_size is not None and remote_size == local_size:
-                print(f"服务端已存在相同文件，跳过上传: {srt_dest}")
+                skip_count += 1
+                _check_upload_progress()
             else:
                 print(f"上传辅助文件: {srt_dest}...")
                 client.upload(srt_path, task_id=task_id, dest_path=srt_dest)
+                upload_count += 1
+                upload_bytes += local_size
+                _check_upload_progress()
 
     if args.extra_translation_guideline:
         guideline_path = Path(args.extra_translation_guideline)
@@ -796,10 +862,61 @@ def main():
             local_size = guideline_path.stat().st_size
             remote_size = existing_remote_files.get(guideline_path.name)
             if remote_size is not None and remote_size == local_size:
-                print(f"服务端已存在相同文件，跳过上传: {guideline_path.name}")
+                skip_count += 1
+                _check_upload_progress()
             else:
                 print(f"上传翻译指南: {guideline_path.name}...")
                 client.upload(guideline_path, task_id=task_id)
+                upload_count += 1
+                upload_bytes += local_size
+                _check_upload_progress()
+
+    # 上传统计
+    upload_elapsed = time.time() - upload_start_time
+    upload_mins, upload_secs = divmod(int(upload_elapsed), 60)
+    _log(f"上传完成: {upload_count} 个文件已上传, {skip_count} 个已跳过, "
+         f"总计 {upload_bytes / (1024 * 1024):.0f}MB, 耗时 {upload_mins}分{upload_secs}秒")
+
+    # ── 2b. 上传后校验 ─────────────────────────────────────
+    # 逐子目录查询服务端文件列表，确认所有音频 + SRT 都已到位。
+    # 注意：跳过 .mp4 文件——服务端 list_files 不返回 .mp4（client_visibility 白名单不含），
+    # 因为压缩视频仅供服务端人脸检测，不应被客户端下载覆盖高清原版。
+    _log("校验服务端文件...")
+    expected_files: dict[str, set[str]] = {}  # {dest_dir: {filename, ...}}
+    for input_path in args.inputs:
+        path = Path(input_path)
+        dest_dir = _compute_dest_dir(path)
+        server_name = upload_as_map.get(str(path), path.name)
+        if not server_name.lower().endswith('.mp4'):
+            expected_files.setdefault(dest_dir, set()).add(server_name)
+        else:
+            expected_files.setdefault(dest_dir, set())  # 确保目录在校验范围内
+        # SRT
+        srt_lookup_path = path.with_name(server_name)
+        srt_path = _find_matching_srt(srt_lookup_path)
+        if srt_path:
+            expected_files[dest_dir].add(srt_path.name)
+
+    missing_files: list[str] = []
+    for dest_dir, filenames in expected_files.items():
+        try:
+            result = client.list_files(task_id, sub_dir=dest_dir, since=0)
+            server_names = {item["name"] for item in result.get("items", [])
+                           if item["type"] == "file"}
+        except Exception:
+            continue  # 子目录不存在，跳过校验
+        for fname in filenames:
+            if fname not in server_names:
+                missing_files.append(f"{dest_dir}/{fname}")
+
+    if missing_files:
+        print(f"[警告] 以下 {len(missing_files)} 个文件未在服务端找到（可能是上传延迟）：")
+        for f in missing_files[:20]:
+            print(f"  - {f}")
+        if len(missing_files) > 20:
+            print(f"  ... 还有 {len(missing_files) - 20} 个")
+    else:
+        _log("服务端文件校验通过。")
 
     # ── 2b. 编辑重跑预处理 ─────────────────────────────────
     if args.edit_rerun:
@@ -813,15 +930,28 @@ def main():
 
     # ── 3. 远程执行 ─────────────────────────────────────────
     remote_args = _build_remote_args(args)
+
+    # 如果 _build_remote_args 生成了文件列表（大批量时），上传到服务端 task 根目录
+    # 上传成功后本地不再需要，立即清理（避免失败路径遗留临时文件）
+    if "--file-list" in remote_args:
+        list_file = Path(args.inputs[0]).parent / "_remote_input_list.txt"
+        if list_file.exists():
+            _log(f"上传文件列表: {list_file.name}...")
+            client.upload(list_file, task_id=task_id, dest_path=list_file.name)
+            try:
+                list_file.unlink()
+            except OSError:
+                pass
+
     video_summary = _compute_video_summary([Path(p) for p in args.inputs])
-    print(f"启动远程翻译 (client_mode)...")
+    _log(f"启动远程翻译 (client_mode)...")
     try:
         client.run('audio_translate.py', remote_args, task_id=task_id,
                    client_mode=True, video_summary=video_summary)
     except Exception as e:
         # 服务端可能因为一对一约束拒绝（409），此时给出提示
         if "409" in str(e) or "并发上限" in str(e):
-            print(f"\n[错误] 服务端已有任务运行中，请等待或通过 Web UI 取消。")
+            _log(f"[错误] 服务端已有任务运行中，请等待或通过 Web UI 取消。")
             print(f"  task_id={task_id} 已保存，稍后可重跑此命令恢复。")
             sys.exit(1)
         raise
@@ -864,11 +994,11 @@ def main():
         client.wait(task_id, poll_interval=2.0, on_progress=on_progress)
     except KeyboardInterrupt:
         # 捕获 Ctrl+C：通知服务端取消任务，然后退出
-        print(f"\n\n中断信号收到，正在取消服务端任务 {task_id}...")
+        _log(f"中断信号收到，正在取消服务端任务 {task_id}...")
         try:
             result = client.cancel(task_id)
             status = result.get('status', 'unknown')
-            print(f"任务已取消: {status}")
+            _log(f"任务已取消: {status}")
             # 容器重启在服务端进程内完成（按需重启当前正在使用的 GPU 容器）
         except Exception as e:
             print(f"取消任务失败: {e}")
@@ -879,20 +1009,20 @@ def main():
         error_code, error_msg = _parse_error_code(last_stdout_lines)
         if error_code:
             if error_code == 'E_CANCEL':
-                print(f"\n任务已取消 (E_CANCEL)")
+                _log(f"任务已取消 (E_CANCEL)")
                 print(f"task_id={task_id} 已保存，重跑可恢复。")
                 sys.exit(1)
             else:
-                print(f"\n[错误] {error_code}: {error_msg or '流水线执行失败'}")
+                _log(f"[错误] {error_code}: {error_msg or '流水线执行失败'}")
                 print(f"错误代码说明请参考: 错误代码说明.md")
                 print(f"task_id={task_id} 已保存，重跑可恢复。")
                 sys.exit(1)
         else:
-            print(f"\n任务失败: {e}")
+            _log(f"任务失败: {e}")
             print(f"task_id={task_id} 已保存，重跑可恢复。")
             sys.exit(1)
     except TimeoutError as e:
-        print(f"\n任务超时: {e}")
+        _log(f"任务超时: {e}")
         # 查询服务端任务当前状态，帮助用户判断是否仍在运行
         try:
             info = client.status(task_id)
@@ -930,7 +1060,7 @@ def main():
             time.sleep(2)
 
     if all_missing:
-        print(f"\n[错误] 以下 {len(all_missing)} 个文件未能同步到本地：")
+        _log(f"[错误] 以下 {len(all_missing)} 个文件未能同步到本地：")
         for f in all_missing[:20]:
             print(f"  - {f}")
         if len(all_missing) > 20:
@@ -955,7 +1085,7 @@ def main():
         extra_local.extend(extras)
 
     if extra_local:
-        print(f"\n[错误] 清理后仍有 {len(extra_local)} 个本地文件在服务端不存在：")
+        _log(f"[错误] 清理后仍有 {len(extra_local)} 个本地文件在服务端不存在：")
         for f in extra_local[:20]:
             print(f"  - {f}")
         if len(extra_local) > 20:
@@ -967,22 +1097,24 @@ def main():
     elapsed = time.time() - task_start_time
     mins, secs = divmod(int(elapsed), 60)
     hours, mins = divmod(mins, 60)
-    print(f"所有文件同步完成，客户端与服务端文件一一对应。")
-    print(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
+    _log(f"所有文件同步完成，客户端与服务端文件一一对应。")
+    _log(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
+
+
 
     # ── 7. 归档任务到 US3（可选）──────────────────────────
     # 客户端已下载并校验完所有文件后，通知服务端上传到 US3 并删除本地文件
     # --no-archive 时跳过（由调用方如 video_translate.py 在后续步骤后手动归档）
     if not args.no_archive:
-        print(f"\n--- Step 7: 归档任务到 US3 ---")
-        print(f"正在归档历史任务 (task_id={task_id})...")
+        _log(f"--- Step 7: 归档任务到 US3 ---")
+        _log(f"正在归档历史任务 (task_id={task_id})...")
         try:
             archive_result = client.archive_task(task_id)
             archive_status = archive_result.get("status", "unknown")
             if archive_status == "archived":
                 uploaded = archive_result.get("uploaded", 0)
                 skipped = archive_result.get("skipped", 0)
-                print(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
+                _log(f"归档完成：上传 {uploaded} 个文件，跳过 {skipped} 个已存在文件。")
                 print(f"服务端本地文件已清理。")
             elif archive_status == "failed":
                 error_msg = archive_result.get("error", "未知错误")

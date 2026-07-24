@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """将匹配的 SRT 字幕文件复制到每个视频的专属文件夹中。
 
-本脚本与 `Tools/organize_videos_into_folders.py` 的视频发现/过滤逻辑保持一致，
 用于后续准备阶段：
 1) 递归扫描根目录下的候选源视频。
 2) 递归扫描字幕目录下的 `.srt` 文件。
@@ -13,15 +12,16 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import sys
 from pathlib import Path
 
+# 添加父目录到 sys.path，使 Common 可导入
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from Common.config import PIPELINE_DERIVED_STEM_MARKERS
+
 VIDEO_SUFFIXES = {".mp4"}
-IGNORED_STEM_MARKERS = (
-    "_translated_",
-    "_match_audio",
-    "_vocals",
-    "_others",
-)
+IGNORED_STEM_MARKERS = PIPELINE_DERIVED_STEM_MARKERS
 
 
 def is_candidate_video(path: Path) -> bool:

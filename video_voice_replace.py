@@ -26,8 +26,8 @@
 
 编辑重跑（--edit-rerun）：
     首次运行完成后，可编辑本地 segments/ 目录下的文件，加 --edit-rerun 重跑：
-    - 改 ASR 文本：编辑 segments/ASR/{stem}.txt → 上传 + 删除对应 TTS 产物 → 重新合成
-    - 删合成音频：删除 segments/{lang}/{stem}.mp3 → 删除服务端对应文件 → 重新合成
+    - 改 ASR 文本：编辑 segments/ASR/{stem}.txt -> 上传 + 删除对应 TTS 产物 -> 重新合成
+    - 删合成音频：删除 segments/{lang}/{stem}.mp3 -> 删除服务端对应文件 -> 重新合成
     服务端各步骤有缓存跳过逻辑，仅重跑受影响的部分。
 
 依赖：
@@ -42,6 +42,7 @@ import argparse
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
@@ -81,6 +82,12 @@ from edit_rerun import (
     _download_server_txt,
     _print_txt_diff,
 )
+
+
+def _log(msg: str):
+    """带时间戳的日志输出，用于关键节点。"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}", flush=True)
 
 
 # ─── 辅助函数 ─────────────────────────────────────────────
@@ -142,9 +149,9 @@ def _detect_and_apply_edits_voice_replace(
 
     支持的编辑场景：
     1. 改 ASR 文本：编辑 segments/ASR/{stem}.txt
-       → 上传新 txt + 删除语言目录下 txt/mp3/候选目录 + combined/final
+       -> 上传新 txt + 删除语言目录下 txt/mp3/候选目录 + combined/final
     2. 删合成音频：删除 segments/{lang}/{stem}.mp3
-       → 删除服务端对应 mp3 + combined/final + 候选目录
+       -> 删除服务端对应 mp3 + combined/final + 候选目录
 
     服务端各步骤均有缓存跳过逻辑，删除对应文件即可触发重跑。
     """
@@ -236,7 +243,7 @@ def _detect_and_apply_edits_voice_replace(
                     delete_files.add(f"{server_lang_subdir}/{COMBINED_AUDIO_FILENAME}")
                     delete_files.add(f"{server_lang_subdir}/{FINAL_AUDIO_FILENAME}")
                     delete_dirs.add(f"{server_lang_subdir}/_dubbing_candidates/{stem}")
-                    print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除 → 删除合成音频+combined+final")
+                    print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除 \u2192 删除合成音频+combined+final")
 
     # ── 执行上传 ──
     if upload_list:
@@ -298,11 +305,11 @@ def process_voice_replace_pipeline(
     try:
         client.check_server()
     except ConnectionError as e:
-        print(f"[错误] {e}")
+        _log(f"[错误] {e}")
         sys.exit(1)
 
     # ── Step 1: 提取音频 ─────────────────────────────────────
-    print("\n--- Step 1: 提取音频 ---")
+    _log("--- Step 1: 提取音频 ---")
     video_data: dict[Path, dict] = {}
 
     for video_path in video_paths:
@@ -340,7 +347,7 @@ def process_voice_replace_pipeline(
         return
 
     # ── Step 2: 上传文件 ─────────────────────────────────────
-    print("\n--- Step 2: 上传文件 ---")
+    _log("--- Step 2: 上传文件 ---")
 
     # 参考音频上传到 task 工作目录根（服务端 voice_replace.py --ref 参数用相对路径访问）
     ref_filename = ref_audio_path.name
@@ -356,7 +363,7 @@ def process_voice_replace_pipeline(
         task_id = _validate_task_ids(input_paths)
         if task_id:
             if client.task_exists(task_id):
-                print(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
+                _log(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
                 # 校验输入文件与历史任务是否一致（防止换视频导致中间结果覆盖）
                 _validate_input_files_match(client, task_id, input_paths)
             else:
@@ -427,10 +434,10 @@ def process_voice_replace_pipeline(
     # ── 编辑重跑预处理（可选）────────────────────────────────
     if edit_rerun:
         if not task_id:
-            print("[错误] 编辑重跑模式需要已有的 task_id，但未找到 .vt_task_id 文件。")
+            _log("[错误] 编辑重跑模式需要已有的 task_id，但未找到 .vt_task_id 文件。")
             sys.exit(1)
 
-        print("\n--- 编辑重跑预处理 ---")
+        _log("--- 编辑重跑预处理 ---")
         _check_server_time(client)
 
         # 验证服务端已有 segments 输出
@@ -440,28 +447,28 @@ def process_voice_replace_pipeline(
         try:
             result = client.list_files(task_id, sub_dir=segments_subdir, since=0)
             if not result.get("items"):
-                print(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
-                      f"请确认任务 {task_id} 已完成过 ASR 阶段。")
+                _log(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
+                     f"请确认任务 {task_id} 已完成过 ASR 阶段。")
                 sys.exit(1)
         except Exception as e:
-            print(f"[错误] 无法访问服务端 segments 目录: {e}")
+            _log(f"[错误] 无法访问服务端 segments 目录: {e}")
             sys.exit(1)
 
         # 检查服务端无正在运行的任务
         try:
             running = client.status(task_id, since_line=0)
             if running.get("status") == "running":
-                print(f"[错误] 任务 {task_id} 正在运行中，请等待完成后再编辑重跑。")
+                _log(f"[错误] 任务 {task_id} 正在运行中，请等待完成后再编辑重跑。")
                 sys.exit(1)
         except Exception:
             pass
 
         # 执行编辑检测和变更
         _detect_and_apply_edits_voice_replace(client, task_id, input_paths, source)
-        print("--- 编辑重跑预处理完成 ---\n")
+        _log("--- 编辑重跑预处理完成 ---")
 
     # ── Step 3: 远程执行 ─────────────────────────────────────
-    print("\n--- Step 3: 远程音色替换 ---")
+    _log("--- Step 3: 远程音色替换 ---")
 
     # 构建服务端参数
     class _Args:
@@ -475,14 +482,14 @@ def process_voice_replace_pipeline(
 
     remote_args = _build_remote_args(args, ref_filename)
     video_summary = _compute_video_summary([Path(p) for p in args.inputs])
-    print(f"启动远程音色替换 (client_mode)...")
+    _log("启动远程音色替换 (client_mode)...")
 
     try:
         client.run('voice_replace.py', remote_args, task_id=task_id,
                    client_mode=True, video_summary=video_summary)
     except Exception as e:
         if "409" in str(e) or "并发上限" in str(e):
-            print(f"\n[错误] 服务端已有任务运行中，请等待或通过 Web UI 取消。")
+            _log("[错误] 服务端已有任务运行中，请等待或通过 Web UI 取消。")
             print(f"  task_id={task_id} 已保存，稍后可重跑此命令恢复。")
             sys.exit(1)
         raise
@@ -512,20 +519,20 @@ def process_voice_replace_pipeline(
     try:
         client.wait(task_id, poll_interval=2.0, on_progress=on_progress)
     except KeyboardInterrupt:
-        print(f"\n\n中断信号收到，正在取消服务端任务 {task_id}...")
+        _log(f"中断信号收到，正在取消服务端任务 {task_id}...")
         try:
             result = client.cancel(task_id)
             status = result.get('status', 'unknown')
-            print(f"任务已取消: {status}")
+            _log(f"任务已取消: {status}")
         except Exception as e:
             print(f"取消任务失败: {e}")
-        print(f"task_id={task_id} 已保存，重跑可恢复。")
+        _log(f"task_id={task_id} 已保存，重跑可恢复。")
         sys.exit(130)
     except RuntimeError as e:
-        print(f"\n任务失败: {e}")
+        _log(f"任务失败: {e}")
         sys.exit(1)
     except TimeoutError as e:
-        print(f"\n任务超时: {e}")
+        _log(f"任务超时: {e}")
         try:
             info = client.status(task_id)
             srv_status = info.get("status", "unknown")
@@ -540,7 +547,7 @@ def process_voice_replace_pipeline(
         sys.exit(1)
 
     # ── 最终全量同步 ─────────────────────────────────────────
-    print("\n--- Step 4: 下载结果 ---")
+    _log("--- Step 4: 下载结果 ---")
     MAX_SYNC_ROUNDS = 3
     all_missing = []
     for round_num in range(1, MAX_SYNC_ROUNDS + 1):
@@ -561,7 +568,7 @@ def process_voice_replace_pipeline(
             time.sleep(2)
 
     if all_missing:
-        print(f"\n[错误] 以下 {len(all_missing)} 个文件未能同步到本地：")
+        _log(f"[错误] 以下 {len(all_missing)} 个文件未能同步到本地：")
         for f in all_missing[:20]:
             print(f"  - {f}")
         if len(all_missing) > 20:
@@ -574,7 +581,7 @@ def process_voice_replace_pipeline(
         _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0, cleanup_stale=True)
 
     # ── Step 5: 替换视频音轨 ─────────────────────────────────
-    print("\n--- Step 5: 替换视频音轨 ---")
+    _log("--- Step 5: 替换视频音轨 ---")
 
     lang_dir_name = get_language_dir_name(source)
 
@@ -599,7 +606,7 @@ def process_voice_replace_pipeline(
                 print(f"合成音频未找到 ({video_path.name})，跳过音轨替换")
                 continue
 
-            print(f"  替换音轨: {video_path.name} + {final_audio.name} -> {out_video.name}...")
+            print(f"  替换音轨: {video_path.name} + {final_audio.name} \u2192 {out_video.name}...")
             mux_audio_into_video(video_path, final_audio, out_video)
             print(f"  音色替换视频已保存: {out_video}")
 
@@ -609,7 +616,7 @@ def process_voice_replace_pipeline(
     elapsed = time.time() - task_start_time
     mins, secs = divmod(int(elapsed), 60)
     hours, mins = divmod(mins, 60)
-    print(f"\n任务处理总耗时: {hours}小时{mins}分{secs}秒")
+    _log(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
 
 
 # ============================================================
@@ -646,14 +653,14 @@ def main():
     # 验证参考音频
     ref_audio_path = Path(args.ref).resolve()
     if not ref_audio_path.exists():
-        print(f"参考音频文件不存在: {ref_audio_path}")
+        _log(f"参考音频文件不存在: {ref_audio_path}")
         sys.exit(1)
 
     # 解析输入路径
     video_paths = [Path(p) for p in args.inputs]
     video_paths = [p for p in video_paths if p.exists()]
     if not video_paths:
-        print("未找到有效的输入文件")
+        _log("未找到有效的输入文件")
         sys.exit(1)
 
     # 检查每个视频是否在独立目录中
@@ -663,7 +670,7 @@ def main():
         dir_to_videos.setdefault(dir_key, []).append(vp)
     multi_video_dirs = {d: vps for d, vps in dir_to_videos.items() if len(vps) > 1}
     if multi_video_dirs:
-        print('[错误] 以下目录中包含多个输入文件，违反"每个文件独立目录"规则：')
+        _log('[错误] 以下目录中包含多个输入文件，违反"每个文件独立目录"规则：')
         for dir_path, vps in multi_video_dirs.items():
             print(f"  目录: {dir_path}")
             for vp in vps:
@@ -675,7 +682,7 @@ def main():
     try:
         server_url = resolve_server_arg(args.server, scheduler=args.scheduler)
     except (ConnectionError, RuntimeError) as e:
-        print(f"[错误] {e}")
+        _log(f"[错误] {e}")
         sys.exit(1)
 
     process_voice_replace_pipeline(

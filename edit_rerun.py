@@ -34,6 +34,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import difflib
 import hashlib
 import re
@@ -58,6 +60,12 @@ from Common.config import (
 from Common.language_map import get_language_dir_name, normalize_target_language_codes
 
 from remote_client import RemoteScriptClient
+
+
+def _log(msg: str):
+    """带时间戳的日志输出，用于关键节点。"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {msg}", flush=True)
 
 
 # 服务端 segments/ASR/ 下的非 txt 文件（full_text.md 等），对比时跳过
@@ -342,7 +350,7 @@ def _detect_and_apply_edits(
         server_segments_items = _list_server_files(server_segments_subdir)
 
         if not server_segments_items:
-            print(f"[错误] 服务端 {dest_dir}/segments/ 不存在或为空，"
+            _log(f"[错误] 服务端 {dest_dir}/segments/ 不存在或为空，"
                   f"请确认任务 {task_id} 已完成过 ASR 阶段。")
             sys.exit(1)
 
@@ -444,7 +452,7 @@ def _detect_and_apply_edits(
                 result = _validate_asr_txt_for_new_segment(local_txt)
                 if result is None:
                     # 校验失败 → 中断，不允许继续
-                    print(f"  [错误] 新增 ASR txt 校验失败，请修正后重试: {new_txt_name}")
+                    _log(f"[错误] 新增 ASR txt 校验失败，请修正后重试: {new_txt_name}")
                     sys.exit(1)
                 stem, duration_s = result
                 remote_asr_path = f"{server_asr_subdir}/{new_txt_name}"
@@ -675,7 +683,7 @@ def _detect_and_apply_edits(
 
     # ── 执行上传 ──
     if upload_list:
-        print(f"\n上传 {len(upload_list)} 个修改的文件...")
+        _log(f"上传 {len(upload_list)} 个修改的文件...")
         for local_file, remote_path in upload_list:
             try:
                 client.upload(local_file, task_id=task_id, dest_path=remote_path)
@@ -689,7 +697,7 @@ def _detect_and_apply_edits(
 
     # ── 执行删除 ──
     if delete_files or delete_dirs:
-        print(f"\n删除 {len(delete_files)} 个文件 + {len(delete_dirs)} 个目录...")
+        _log(f"删除 {len(delete_files)} 个文件 + {len(delete_dirs)} 个目录...")
         try:
             result = client.delete_files(
                 task_id,
@@ -711,7 +719,7 @@ def _detect_and_apply_edits(
             print(f"  [错误] 批量删除失败: {e}")
 
     if not upload_list and not delete_files and not delete_dirs:
-        print("未检测到任何编辑变更，服务端文件已是最新。")
+        _log("未检测到任何编辑变更，服务端文件已是最新。")
 
 
 def preprocess_edit_rerun(
@@ -737,11 +745,11 @@ def preprocess_edit_rerun(
         compute_dest_dir: 计算输入文件在服务端工作目录中的子目录名的函数
     """
     if not task_id:
-        print("[错误] 编辑重跑模式需要已有的 task_id，但未找到 .vt_task_id 文件。")
+        _log("[错误] 编辑重跑模式需要已有的 task_id，但未找到 .vt_task_id 文件。")
         print("  编辑重跑模式要求服务端之前已跑过此任务。如需新建任务，去掉 --edit-rerun 参数。")
         sys.exit(1)
 
-    print("\n--- 编辑重跑预处理 ---")
+    _log("--- 编辑重跑预处理 ---")
 
     # 时间同步检查
     _check_server_time(client)
@@ -753,18 +761,18 @@ def preprocess_edit_rerun(
     try:
         result = client.list_files(task_id, sub_dir=segments_subdir, since=0)
         if not result.get("items"):
-            print(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
+            _log(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
                   f"请确认任务 {task_id} 已完成过 ASR 阶段。")
             sys.exit(1)
     except Exception as e:
-        print(f"[错误] 无法访问服务端 segments 目录: {e}")
+        _log(f"[错误] 无法访问服务端 segments 目录: {e}")
         sys.exit(1)
 
     # 检查服务端无正在运行的任务
     try:
         running = client.status(task_id, since_line=0)
         if running.get("status") == "running":
-            print(f"[错误] 任务 {task_id} 正在运行中，请等待完成后再编辑重跑。")
+            _log(f"[错误] 任务 {task_id} 正在运行中，请等待完成后再编辑重跑。")
             sys.exit(1)
     except Exception:
         pass  # 查询失败不阻断
@@ -775,4 +783,4 @@ def preprocess_edit_rerun(
     # 执行编辑检测和变更
     _detect_and_apply_edits(client, task_id, input_paths, target_codes, compute_dest_dir)
 
-    print("--- 编辑重跑预处理完成 ---\n")
+    _log("--- 编辑重跑预处理完成 ---")

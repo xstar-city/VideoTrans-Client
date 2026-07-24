@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """基本模式视频翻译快捷脚本。
 
-预置最优参数，适合大多数场景：
+预置最优参数，适合单人视频（无需复杂 diarization）：
 - ASR 模式：basic（ASR 自带说话人切分）
-- 翻译模式：independent（无需 TTS 时长感知）
+- 翻译模式：tts_aware（TTS 时长感知翻译，确保合成语音贴合原段时长）
+- 非语言人声/唱歌检测：关闭（单人场景默认不需要）
 
-视频画面/背景音轨保持原样（"禁止伸缩"简化架构），无视频变速参数。
+视频画面/背景音轨保持原样，不做任何伸缩。
 
 使用方式：
     python video_translate_basic.py "video.mp4" -t en --server <IP>
     python video_translate_basic.py "a.mp4" "b.mp4" -t en ja --server <IP>
 
-与 video_translate.py 的区别仅在于默认参数，所有完整参数仍可通过命令行覆盖。
+与 video_translate.py 的区别仅在于默认参数（basic ASR、无 diarization、无非语言检测），
+所有完整参数仍可通过命令行覆盖。
 """
 
 from __future__ import annotations
@@ -21,16 +23,20 @@ import sys
 from pathlib import Path
 
 
+from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
+from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from remote_client import resolve_server_arg
-from video_translate import process_video_pipeline
+from video_translate import DEFAULT_MODELS, process_video_pipeline
 
 
 def main():
-    p = argparse.ArgumentParser(description="基本模式视频翻译（预置最优参数：basic ASR + independent 翻译）")
+    p = argparse.ArgumentParser(description="基本模式视频翻译（预置最优参数：basic ASR + tts_aware 翻译，适合单人视频）")
     # ── 用户常用参数 ──
     p.add_argument("inputs", nargs="+", help="本地视频文件路径")
-    p.add_argument("--target", "-t", dest="targets", nargs="+", default=["en"], help="目标语言代码，默认：en")
-    p.add_argument("--source", "-s", default="zh", help="源语言代码，默认：zh")
+    p.add_argument("--target", "-t", dest="targets", nargs="+", default=["en"],
+                   choices=ALL_TTS_LANGUAGE_CODES, help="目标语言代码，默认：en")
+    p.add_argument("--source", "-s", default="zh",
+                   choices=ALL_ASR_LANGUAGE_CODES, help="源语言代码，默认：zh")
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
     server_group = p.add_mutually_exclusive_group()
@@ -41,8 +47,16 @@ def main():
                                    "与 --server 互斥。")
     # ── 可覆盖的预置参数 ──
     p.add_argument("--denoise", choices=["none", "normal", "aggressive"], default="aggressive", help="音频降噪类型，默认：aggressive")
-    p.add_argument("--translation-models", default="", help="翻译模型列表，空值使用默认模型")
+    p.add_argument("--translation-models", default=",".join(DEFAULT_MODELS), help="翻译模型列表，以逗号分隔。默认使用与完整版相同的模型列表。")
     p.add_argument("--extra-translation-guideline", default=None, help="额外翻译指南文本文件路径")
+    # ── 工作流参数 ──
+    p.add_argument('--stop-after-translation', action='store_true',
+                   help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
+                        '翻译完成后始终生成 full_translation.srt 字幕文件。'
+                        '核心用途：翻译文本后人工介入检查，确认无误后再继续后续流程。')
+    p.add_argument('--new-task', '-n', action='store_true',
+                   help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
+                        '在服务端创建全新任务。用于需要完全重跑的场景。')
 
     args = p.parse_args()
 
@@ -83,13 +97,15 @@ def main():
             source=args.source,
             separate=args.separate,
             # ── 基本模式预置参数 ──
-            detect_nonverbal_and_singing=False,  # 基本模式无需「非语言人声 + 唱歌」检测
+            detect_nonverbal_and_singing=False,  # 单人场景默认不需要
             denoise=args.denoise,
             asr_mode="basic",               # 基本模式使用 ASR 自带说话人切分
             translation_models=args.translation_models,
-            translation_mode="independent", # 基本模式无需 TTS 时长感知
-            tts_aware_max_retries=0,        # independent 模式不使用
+            translation_mode="tts_aware",   # TTS 时长感知翻译
             extra_translation_guideline=args.extra_translation_guideline,
+            # ── 工作流参数 ──
+            stop_after_translation=args.stop_after_translation,
+            new_task=args.new_task,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

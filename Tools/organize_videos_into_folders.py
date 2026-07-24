@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """递归扫描视频，统一转为 mp4，并将每个视频放入其专属文件夹。
 
-本脚本与 `short_drama_translate.py` 的视频发现/过滤逻辑保持一致，
 用于准备阶段：
 1) 递归扫描根目录下的候选源视频。
 2) 将每个视频移入 `parent/<video_stem>/<video_filename>`。
@@ -13,15 +12,16 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
+# 添加父目录到 sys.path，使 Common 可导入
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from Common.config import PIPELINE_DERIVED_STEM_MARKERS
+
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
-IGNORED_STEM_MARKERS = (
-    "_translated_",
-    "_match_audio",
-    "_vocals",
-    "_others",
-)
+IGNORED_STEM_MARKERS = PIPELINE_DERIVED_STEM_MARKERS
 
 
 def is_candidate_video(path: Path) -> bool:
