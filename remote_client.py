@@ -556,6 +556,50 @@ class RemoteScriptClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ─── 追加编辑重跑日志 ──────────────────────────────────
+
+    def append_rerun_log(self, task_id: str, dest_dir: str,
+                         input_files: list[str],
+                         changes: list[dict],
+                         uploads: list[str],
+                         deletes_files: list[str],
+                         deletes_dirs: list[str],
+                         summary: str) -> dict:
+        """向服务端追加编辑重跑日志条目（JSONL 格式）。
+
+        服务端负责分配 seq 和 timestamp，客户端只传变更内容。
+
+        参数:
+            task_id: 任务 ID
+            dest_dir: 输入文件在服务端工作目录中的子目录名
+            input_files: 输入文件名列表
+            changes: 变更列表，每项包含 action/stem/target_lang/details
+            uploads: 上传的文件路径列表（segments/ 相对路径）
+            deletes_files: 删除的文件路径列表（segments/ 相对路径）
+            deletes_dirs: 删除的目录路径列表（segments/ 相对路径）
+            summary: 人类可读的变更摘要
+
+        返回:
+            {"seq": int, "timestamp": str}
+        """
+        body = {
+            "dest_dir": dest_dir,
+            "input_files": input_files,
+            "changes": changes,
+            "uploads": uploads,
+            "deletes_files": deletes_files,
+            "deletes_dirs": deletes_dirs,
+            "summary": summary,
+        }
+        resp = requests.post(
+            f"{self.base_url}/rerun-log/{task_id}",
+            json=body,
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ─── 取消任务 ──────────────────────────────────────────
 
     def cancel(self, task_id: str) -> dict:

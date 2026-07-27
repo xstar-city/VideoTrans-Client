@@ -118,6 +118,7 @@ def process_video_pipeline(
     edit_rerun: bool = False,
     stop_after_translation: bool = False,
     new_task: bool = False,
+    keep_server_files: bool = False,
 ):
     """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
 
@@ -312,7 +313,10 @@ def process_video_pipeline(
     if stop_after_translation:
         _log("--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
         _log("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
-        _archive_task_after_pipeline(video_data, server_url)
+        if not keep_server_files:
+            _archive_task_after_pipeline(video_data, server_url)
+        else:
+            _log("[调试模式] 保留服务端任务文件，跳过归档。")
         return
 
     _log("--- Step 3: 合并音轨 ---")
@@ -362,7 +366,10 @@ def process_video_pipeline(
                 print(f"[错误] 处理 {video_path.name} ({code}) 失败: {e}")
 
     # 所有视频合并完成后，归档服务端任务到 US3
-    _archive_task_after_pipeline(video_data, server_url)
+    if not keep_server_files:
+        _archive_task_after_pipeline(video_data, server_url)
+    else:
+        _log("[调试模式] 保留服务端任务文件，跳过归档。")
 
 
 # ============================================================
@@ -421,6 +428,10 @@ def main():
     p.add_argument('--new-task', '-n', action='store_true',
                    help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
                         '在服务端创建全新任务。用于需要完全重跑的场景。')
+    p.add_argument('--keep-server-files', action='store_true',
+                   help='调试用：跑完后不归档、不删除服务端任务目录，方便检查中间产物。'
+                        '注意：audio_translate 已通过 --no-archive 禁止自动归档，'
+                        '本参数额外跳过 video_translate 最终的归档步骤。')
 
     
     args = p.parse_args()
@@ -481,6 +492,7 @@ def main():
             edit_rerun=args.edit_rerun,
             stop_after_translation=args.stop_after_translation,
             new_task=args.new_task,
+            keep_server_files=args.keep_server_files,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

@@ -87,12 +87,12 @@ python batch_video_translate.py "E:\短剧\《逐玉》" -t en --server <ServerI
 ├── 1.mp3                       ← 提取的音频
 ├── 1_vocals_denoised.mp3       ← 分离出的人声（经降噪）
 ├── 1_others_denoised.mp3       ← 分离出的背景音（经降噪）
-├── non_speech_vocal_events/     ← 检测到的非语言人声事件（笑声、唱歌等，可试听）
-│   ├── 0001_laughter_00000000_00005000.mp3   事件切片音频
-│   └── ...
 ├── 1_translated_en.mp4         ← 英文翻译视频
 └── segments/                   ← 所有中间文件
-    ├── ASR/                    ← 语音识别结果（逐段 txt：第一行=ASR文本，第二行=音频时长秒数）
+    ├── ASR/                    ← 语音识别结果（逐段 txt + full_text.srt 全文字幕）
+    ├── non_speech_vocal_events/ ← 检测到的非语言人声事件（笑声、唱歌等，可试听/删除误判）
+    │   ├── 0001_laughter_00000000_00005000.mp3   事件切片音频
+    │   └── ...
     └── English/                ← 英文翻译中间文件
         ├── 0.000.txt          ← 逐段翻译文本
         ├── 0.000.mp3          ← 逐段合成音频
@@ -358,14 +358,17 @@ python audio_translate.py "1.mp3" -t en hi --server <ServerIP> --edit-rerun
 | 简称 | 完整路径 | 说明 |
 |------|----------|------|
 | ASR 文本 | `segments/ASR/{stem}.txt` | 原声音频的语音识别结果。格式：第一行=ASR 文本，第二行=音频时长秒数（三位小数） |
+| ASR 字幕 | `segments/ASR/full_text.srt` | ASR 全文字幕（SRT 格式，含时间戳）。编辑后 `--edit-rerun` 只覆盖文本（保留原始时长/断句），SRT 优先于 txt 独立修改 |
 | 翻译文本 | `segments/{lang}/{stem}.txt` | ASR 文本翻译到目标语言后的文本 |
 | 合成音频 mp3 | `segments/{lang}/{stem}.mp3` | 基于翻译文本 TTS 合成的目标语言音频 |
 | 翻译候选 md | `segments/{lang}/{stem}.md` | 翻译过程中保存的候选/调试信息 |
 | 翻译字幕 | `segments/{lang}/full_translation.srt` | 完整翻译字幕文件（`--stop-after-translation` 模式生成，可人工编辑后 `--edit-rerun` 回写 txt） |
 | 翻译指南 | `segments/{lang}/translation_guidelines.txt` | 翻译指南文件（修改后 `--edit-rerun` 会删除所有翻译产物强制重新翻译） |
+| 非语音片段 | `segments/non_speech_vocal_events/{clip}.mp3` | 检测到的笑声、咳嗽、唱歌等非语言人声事件切片。最终混音时叠加到背景音轨；删除误判片段后 `--edit-rerun` 会从背景音中移除 |
 
 | 场景 | 操作方式 | 客户端检测 | 自动执行 |
 |------|----------|-----------|---------|
+| **改 ASR 字幕** | 编辑 `segments/ASR/full_text.srt` | 下载服务端 SRT 对比，内容不一致 | 解析 SRT 只将文本写回对应 txt（保留原始时长，不修改断句）并上传；删除所有语言目录下同 stem 的 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录；忽略 txt 的独立修改 |
 | **改 ASR 文本** | 编辑 `segments/ASR/{stem}.txt` | 下载服务端 ASR 文本逐字对比，内容不一致 | 上传新 ASR 文本；删除所有语言目录下同 stem 的 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录 |
 | | | | 若时长行（第二行）也变更：额外删除 `segments/{stem}.mp3` + 各语言目录下 `{stem}.mp3` + md + 候选目录，服务端重新切分 |
 | **新增 ASR 文本** | 在 `segments/ASR/` 下新建 `{stem}.txt` | 客户端有但服务端没有 | 校验两行格式 + 时长 > 0.3s → 上传 txt；服务端自动从人声音频切分 mp3 |
@@ -376,17 +379,19 @@ python audio_translate.py "1.mp3" -t en hi --server <ServerIP> --edit-rerun
 | **删某句翻译文本** | 删除 `segments/{lang}/{stem}.txt` | 本地翻译文本缺失 | 删除服务端对应 翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录 |
 | **改翻译字幕** | 编辑 `segments/{lang}/full_translation.srt` | 下载服务端 SRT 对比，内容不一致 | 上传 SRT；解析 SRT 将文本写回对应 txt 并上传；**逐句比对文本，仅文本有变更的句子才删除对应 TTS 产物**；删除 combined/final；忽略 txt 的独立修改 |
 | **改翻译指南** | 编辑 `segments/{lang}/translation_guidelines.txt` | 下载服务端指南对比，内容不一致 | 上传新指南；删除该语言目录下所有翻译 txt + TTS 产物 + combined/final，强制重新翻译 |
+| **删非语音片段** | 删除 `segments/non_speech_vocal_events/{clip}.mp3` | 本地片段缺失，服务端仍存在 | 删除服务端对应片段；删除所有语言的 final.mp3 触发重新混音（该片段不再叠加到背景音） |
 
 #### SRT 回写 txt 规则
 
-编辑 `full_translation.srt` 后 `--edit-rerun` 时，客户端会解析 SRT 中每条字幕的**开始时间**，与同语言目录下已有的 `{stem}.txt` 文件名（stem 为起始秒数）进行匹配，将字幕文本写回对应 txt：
+ASR 字幕（`full_text.srt`）和翻译字幕（`full_translation.srt`）共用同一套 SRT 回写机制。编辑后 `--edit-rerun` 时，客户端会解析 SRT 中每条字幕的**开始时间**，与已有 `{stem}.txt` 文件名（stem 为起始秒数）进行匹配，将字幕文本写回对应 txt：
 
 | 步骤 | 说明 |
 |------|------|
 | **时间匹配** | 取 SRT 每条字幕的开始时间（秒），在已有 txt 文件中寻找**时间差最小**的 stem，允许误差 **300ms**（字幕编辑软件可能微调时间戳，此容差用于兜底） |
-| **匹配成功** | 将 SRT 文本写入对应 `{stem}.txt` 并上传服务端；删除该句的 TTS 产物（mp3 + md + 候选目录）；删除 combined/final 触发重新合成 |
+| **匹配成功** | 将 SRT 文本写入对应 `{stem}.txt` 并上传服务端；删除下游产物（ASR SRT：所有语言的翻译+TTS；翻译 SRT：该语言的 TTS 产物）；删除 combined/final 触发重新合成 |
 | **匹配失败** | 打印 `[跳过]` 警告并忽略该条字幕，不写回任何 txt |
 | **文本未变** | 若 SRT 解析出的文本与现有 txt 内容完全一致，跳过该句（不重复上传/删除） |
+| **只改文本** | SRT 回写**只覆盖文本**，不修改断句/时长。ASR txt 的时长行（第二行）保持原值；字幕编辑软件对时间戳的微调会被忽略 |
 | **txt 独立修改** | 当 SRT 被修改时，txt 的独立修改会被**忽略**——以 SRT 内容为准，防止 SRT 与 txt 不一致 |
 
 > 💡 匹配基于开始时间而非序号，因此即使 SRT 中增删了条目导致序号变化，只要时间戳对得上就能正确回写。
@@ -425,8 +430,9 @@ python audio_translate.py "1.mp3" -t en hi --server <ServerIP> --edit-rerun
 # 1. 首次翻译
 python video_translate.py "1.mp4" -t en --server 192.168.1.100
 
-# 2. 翻译完成后，编辑本地 ASR 文本
-#    编辑 1/segments/ASR/0.000.txt 修正识别错误
+# 2. 翻译完成后，编辑本地 ASR 字幕修正识别错误
+#    编辑 1/segments/ASR/full_text.srt（推荐，批量编辑更方便）
+#    或编辑 1/segments/ASR/0.000.txt 逐段修改
 
 # 3. 编辑重跑——只重新翻译受影响的段落
 python video_translate.py "1.mp4" -t en --server 192.168.1.100 --edit-rerun
@@ -452,6 +458,24 @@ python video_translate.py "1.mp4" -t en --server 192.168.1.100
 ```
 
 > 💡 编辑重跑模式与断点续跑兼容。如果编辑重跑过程中途中断，再次执行同样的 `--edit-rerun` 命令即可续跑。
+
+### 删除误判非语音片段
+
+检测到的非语言人声事件（笑声、咳嗽、唱歌等）偶尔会误判。翻译完成后可在本地试听 `segments/non_speech_vocal_events/` 目录下的 mp3 片段，删除误判后编辑重跑即可从背景音中移除：
+
+```
+# 1. 首次翻译
+python video_translate.py "1.mp4" -t en --server 192.168.1.100
+
+# 2. 试听 segments/non_speech_vocal_events/ 下的片段
+#    发现 0003_sigh_00250000_00252000.mp3 是误判（实际是正常说话）
+#    删除该 mp3 文件
+
+# 3. 编辑重跑--服务端删除该片段并重新混音
+python video_translate.py "1.mp4" -t en --server 192.168.1.100 --edit-rerun
+```
+
+编辑重跑会删除服务端对应的片段文件，并删除所有语言的 `final.mp3` 触发重新混音。重新混音时该片段不再叠加到背景音轨道。
 
 ---
 
