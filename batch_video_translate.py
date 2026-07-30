@@ -300,6 +300,10 @@ def main():
                         '适用于短剧、电影等场景。默认开启；传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive',
                    help='音频降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
+    p.add_argument('--extract-residual-noise', action=argparse.BooleanOptionalAction, default=True,
+                   help='提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。'
+                        '需要启用人声分离。默认开启；传 --no-extract-residual-noise 关闭。')
+    
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise',
                    help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
     p.add_argument('--enable-visual-diarization', '-v', action=argparse.BooleanOptionalAction, default=False,
@@ -399,6 +403,7 @@ def main():
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
             denoise=args.denoise,
+            extract_residual_noise=args.extract_residual_noise,
             asr_mode=args.asr_mode,
             translation_models=args.translation_models,
             translation_mode=args.translation_mode,
