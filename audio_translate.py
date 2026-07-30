@@ -33,6 +33,12 @@ from pathlib import Path
 
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
+from Common.config import (
+    TTS_MAX_AUDIO_SLOWDOWN_PCT,
+    TTS_MAX_AUDIO_SPEEDUP_PCT,
+    TTS_AWARE_MIN_CANDIDATE_COUNT,
+    TTS_AWARE_MAX_DURATION_RETRIES,
+)
 
 
 from remote_client import RemoteScriptClient, resolve_server_arg
@@ -359,6 +365,10 @@ def _build_remote_args(args) -> list[str]:
     if not args.detect_nonverbal_and_singing:
         remote_args.append('--no-detect-nonverbal-and-singing')
 
+    # 残差噪音提取：默认开启；只在用户显式关闭时透传 --no- 标志
+    if not args.extract_residual_noise:
+        remote_args.append('--no-extract-residual-noise')
+
     # 降噪
     remote_args.extend(['--denoise', args.denoise])
 
@@ -641,10 +651,13 @@ def main():
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
     p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=True,
-                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。'
-                        '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。'
+                        '这些虽是人声但无需翻译，适用于短剧、电影等场景。默认开启；'
                         '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
+    p.add_argument('--extract-residual-noise', action=argparse.BooleanOptionalAction, default=True,
+                   help='提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。'
+                        '需要启用人声分离。默认开启；传 --no-extract-residual-noise 关闭。')
     
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
     p.add_argument('--enable-visual-diarization', dest='enable_visual_diarization', action='store_true', default=False, help=argparse.SUPPRESS)
@@ -652,13 +665,14 @@ def main():
     p.add_argument('--translation-models', default='', help='用于翻译的逗号分隔模型列表。空值使用服务端默认值。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS感知翻译中每句的自适应翻译重试次数（默认: 10）')
-    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
-                   help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
-    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
-                   help='TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: 0.2')
-    p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
-                   help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
+    p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
+                   help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
+    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=TTS_MAX_AUDIO_SLOWDOWN_PCT,
+                   help=f'TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SLOWDOWN_PCT}')
+    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=TTS_MAX_AUDIO_SPEEDUP_PCT,
+                   help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
+    p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
+                   help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
     p.add_argument('--stop-after-translation', action='store_true',
                    help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'

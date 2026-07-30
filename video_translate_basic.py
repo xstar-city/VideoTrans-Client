@@ -39,6 +39,13 @@ def main():
                    choices=ALL_ASR_LANGUAGE_CODES, help="源语言代码，默认：zh")
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
+    p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=False,
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。'
+                        '这些虽是人声但无需翻译，适用于短剧、电影等场景。默认关闭；'
+                        '传 --detect-nonverbal-and-singing 开启。')
+    p.add_argument('--extract-residual-noise', action=argparse.BooleanOptionalAction, default=False,
+                   help='提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。'
+                        '需要启用人声分离。默认关闭；传 --extract-residual-noise 开启。')
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument("--server", default="localhost",
                               help="服务端地址（直连模式），支持 IP、域名或完整 URL。默认：localhost")
@@ -57,6 +64,12 @@ def main():
     p.add_argument('--new-task', '-n', action='store_true',
                    help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
                         '在服务端创建全新任务。用于需要完全重跑的场景。')
+    p.add_argument('--edit-rerun', '-e', action='store_true',
+                   help='编辑重跑模式：检测本地编辑（改ASR/改翻译/替换合成音频/删语种/删mp3/删txt），'
+                        '上传修改的文件并删除服务端对应的下游产物，服务端跳过ASR直接从翻译开始。'
+                        '要求服务端已有该任务的运行记录。')
+    p.add_argument('--keep-server-files', '-k', action='store_true',
+                   help='调试用：跑完后不归档、不删除服务端任务目录，方便检查中间产物。')
 
     args = p.parse_args()
 
@@ -97,7 +110,8 @@ def main():
             source=args.source,
             separate=args.separate,
             # ── 基本模式预置参数 ──
-            detect_nonverbal_and_singing=False,  # 单人场景默认不需要
+            detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
+            extract_residual_noise=args.extract_residual_noise,
             denoise=args.denoise,
             asr_mode="basic",               # 基本模式使用 ASR 自带说话人切分
             translation_models=args.translation_models,
@@ -106,6 +120,8 @@ def main():
             # ── 工作流参数 ──
             stop_after_translation=args.stop_after_translation,
             new_task=args.new_task,
+            edit_rerun=args.edit_rerun,
+            keep_server_files=args.keep_server_files,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

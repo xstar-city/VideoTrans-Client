@@ -26,8 +26,9 @@
 | 改翻译字幕    | 编辑 segments/{lang}/full_translation.srt | 下载服务端 SRT 对比，内容不一致       | 上传 SRT；解析 SRT 将文本写回对应 txt 并上传；删除对应 TTS 产物 + combined/final；忽略 txt 的独立修改 |
 | 改翻译指南    | 编辑 segments/{lang}/translation_guidelines.txt | 下载服务端指南对比，内容不一致    | 上传新指南；删除该语言目录下所有翻译 txt + TTS 产物 + combined/final，强制重新翻译 |
 | 删非语音片段   | 删除 segments/non_speech_vocal_events/{clip}.mp3 | 本地片段缺失               | 删除服务端对应片段 + 删除所有语言 final.mp3 触发重新混音                  |
+| 删残差噪音片段 | 删除 segments/asr_residual_noise/{clip}.mp3 | 本地片段缺失               | 删除服务端对应片段 + 删除所有语言 final.mp3 触发重新混音                  |
 
-处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差合并），直接从翻译步骤开始，
+处理完成后，服务端跳过整个 ASR 流程（人声分离、语音识别、残差噪音提取），直接从翻译步骤开始，
 仅重跑受影响的部分。
 
 新增/修改 ASR 文本时，服务端会在翻译前执行「音频修复」步骤：
@@ -63,6 +64,7 @@ from Common.config import (
     COMBINED_AUDIO_FILENAME,
     FINAL_AUDIO_FILENAME,
     FLEXSED_EVENTS_DIRNAME,
+    ASR_RESIDUAL_NOISE_DIRNAME,
     TRANSLATION_GUIDELINES_FILENAME,
     build_segments_dir,
 )
@@ -288,6 +290,7 @@ _ACTION_LABELS = {
     "modify_translation_srt": "改翻译字幕",
     "modify_translation_guidelines": "改翻译指南",
     "delete_non_speech_event": "删非语音片段",
+    "delete_residual_noise": "删残差噪音片段",
 }
 
 
@@ -307,7 +310,7 @@ def _build_change_summary(changes: list[dict]) -> str:
                 if c["action"] == action
             )
             parts.append(f"{label} {count} 次（{stem_count} 句）")
-        elif action == "delete_non_speech_event":
+        elif action in ("delete_non_speech_event", "delete_residual_noise"):
             clip_count = sum(
                 len(c.get("details", {}).get("deleted_clips", []))
                 for c in changes
@@ -386,6 +389,7 @@ def _detect_and_apply_edits(
     8. 改翻译字幕：full_translation.srt 内容不一致 -> 上传 SRT + 解析 SRT 写回 txt 并上传 + 删除 TTS 产物 + 忽略 txt 独立修改
     9. 改翻译指南：translation_guidelines.txt 内容不一致 -> 上传新指南 + 删除所有翻译产物强制重新翻译
     10. 删非语音片段：本地 non_speech_vocal_events/{clip}.mp3 缺失 -> 删除服务端片段 + 删除所有语言 final.mp3 触发重新混音
+    11. 删残差噪音片段：本地 asr_residual_noise/{clip}.mp3 缺失 -> 删除服务端片段 + 删除所有语言 final.mp3 触发重新混音
 
     所有删除操作同时清理服务端和客户端本地文件，避免后续同步混乱。
     每次会话结束后，变更详情（含文本前后内容）追加到 segments/edit_rerun_log.jsonl。
@@ -626,44 +630,60 @@ def _detect_and_apply_edits(
                     },
                 })
 
-        # ── 场景 10：检测 non_speech_vocal_events 误判片段删除 ──
-        # 用户删除本地 segments/non_speech_vocal_events/{clip}.mp3
+        # ── 场景 10 & 11：检测片段删除（FlexSED 非语音事件 + ASR 残差噪音）──
+        # 用户删除本地 segments/{clips_dir}/{clip}.mp3
         # -> 删除服务端对应片段 + 删除所有语言的 final.mp3 触发重新混音
-        server_events_subdir = f"{server_segments_subdir}/{FLEXSED_EVENTS_DIRNAME}"
-        server_events_items = _list_server_files(server_events_subdir)
-        if server_events_items:
-            local_events_dir = local_segments_dir / FLEXSED_EVENTS_DIRNAME
-            clips_deleted = False
-            deleted_clip_names: list[str] = []
-            for item in server_events_items:
+        def _detect_deleted_clips(clips_dirname: str, log_label: str) -> list[str]:
+            """检测服务端有但本地没有的 .mp3 片段，加入 delete_files，返回被删除的文件名列表。"""
+            server_clips_subdir = f"{server_segments_subdir}/{clips_dirname}"
+            server_items = _list_server_files(server_clips_subdir)
+            if not server_items:
+                return []
+            local_clips_dir = local_segments_dir / clips_dirname
+            deleted_names: list[str] = []
+            for item in server_items:
                 if item.get("type") != "file":
                     continue
                 name = item["name"]
                 if not name.endswith(".mp3"):
                     continue
-                local_clip = local_events_dir / name
+                local_clip = local_clips_dir / name
                 if not local_clip.exists():
-                    delete_files.append(f"{server_events_subdir}/{name}")
-                    clips_deleted = True
-                    deleted_clip_names.append(name)
-                    print(f"  [删非语音片段] {FLEXSED_EVENTS_DIRNAME}/{name} 本地已删除，删除服务端片段")
-            if clips_deleted:
-                # 删除所有语言的 final.mp3 触发重新混音（片段不再叠加到 others）
-                for code in target_codes:
-                    lang_dir_name = get_language_dir_name(code)
-                    server_lang_subdir_temp = f"{server_segments_subdir}/{lang_dir_name}"
-                    delete_files.append(f"{server_lang_subdir_temp}/{FINAL_AUDIO_FILENAME}")
-                    local_lang_dir_temp = local_segments_dir / lang_dir_name
-                    local_final = local_lang_dir_temp / FINAL_AUDIO_FILENAME
-                    if local_final.exists():
-                        local_final.unlink()
-                print(f"    已触发所有语言 final.mp3 重新混音")
-                # 收集返修日志
+                    delete_files.append(f"{server_clips_subdir}/{name}")
+                    deleted_names.append(name)
+                    print(f"  [{log_label}] {clips_dirname}/{name} 本地已删除，删除服务端片段")
+            return deleted_names
+
+        all_deleted_clips: list[tuple[str, list[str]]] = []  # [(action, clip_names), ...]
+
+        # 场景 10：FlexSED 非语音事件片段（笑声、唱歌等）
+        deleted = _detect_deleted_clips(FLEXSED_EVENTS_DIRNAME, "删非语音片段")
+        if deleted:
+            all_deleted_clips.append(("delete_non_speech_event", deleted))
+
+        # 场景 11：ASR 残差噪音片段（写字、摩擦、开门等）
+        deleted = _detect_deleted_clips(ASR_RESIDUAL_NOISE_DIRNAME, "删残差噪音片段")
+        if deleted:
+            all_deleted_clips.append(("delete_residual_noise", deleted))
+
+        # 任一类型的片段被删除都触发重新混音
+        if all_deleted_clips:
+            for code in target_codes:
+                lang_dir_name = get_language_dir_name(code)
+                server_lang_subdir_temp = f"{server_segments_subdir}/{lang_dir_name}"
+                delete_files.append(f"{server_lang_subdir_temp}/{FINAL_AUDIO_FILENAME}")
+                local_lang_dir_temp = local_segments_dir / lang_dir_name
+                local_final = local_lang_dir_temp / FINAL_AUDIO_FILENAME
+                if local_final.exists():
+                    local_final.unlink()
+            print(f"    已触发所有语言 final.mp3 重新混音")
+            # 收集返修日志
+            for action, clip_names in all_deleted_clips:
                 input_changes.append({
-                    "action": "delete_non_speech_event",
+                    "action": action,
                     "stem": None,
                     "target_lang": None,
-                    "details": {"deleted_clips": deleted_clip_names},
+                    "details": {"deleted_clips": clip_names},
                 })
 
         # ── 场景 2-5：检测各语言目录的编辑 ──

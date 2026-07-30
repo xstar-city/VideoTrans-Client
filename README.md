@@ -91,7 +91,11 @@ python batch_video_translate.py "E:\短剧\《逐玉》" -t en --server <ServerI
 └── segments/                   ← 所有中间文件
     ├── ASR/                    ← 语音识别结果（逐段 txt + full_text.srt 全文字幕）
     ├── non_speech_vocal_events/ ← 检测到的非语言人声事件（笑声、唱歌等，可试听/删除误判）
-    │   ├── 0001_laughter_00000000_00005000.mp3   事件切片音频
+    │   ├── 非语音事件报告.md      事件检测报告（类型/时间/置信度/处理方式）
+    │   ├── 2.360.mp3             事件切片音频（文件名 = 起始秒数）
+    │   └── ...
+    ├── asr_residual_noise/     ← ASR 未识别区间的背景噪音片段（写字、摩擦等）
+    │   ├── 11.058.mp3            噪音片段音频（文件名 = 起始秒数）
     │   └── ...
     └── English/                ← 英文翻译中间文件
         ├── 0.000.txt          ← 逐段翻译文本
@@ -250,7 +254,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--separate` / `--no-separate` | 是否启用人声分离（去背景音）。默认开启；传 `--no-separate` 关闭。 | 启用 |
-| `--detect-nonverbal-and-singing` / `--no-detect-nonverbal-and-singing` | 检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；传 `--no-detect-nonverbal-and-singing` 关闭。 | 启用 |
+| `--detect-nonverbal-and-singing` / `--no-detect-nonverbal-and-singing` | 检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。这些虽是人声但无需翻译，适用于短剧、电影等场景。默认开启；传 `--no-detect-nonverbal-and-singing` 关闭。 | 启用 |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
 | `--enable-visual-diarization` / `--no-enable-visual-diarization` | 是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭，关闭时本地抽 mp3 上传服务端（带宽友好）；开启时直接上传完整 mp4，由服务端结合人脸跟踪/嘴部运动等视觉信号辅助说话人切分。 | 关闭 |
@@ -468,7 +472,7 @@ python video_translate.py "1.mp4" -t en --server 192.168.1.100
 python video_translate.py "1.mp4" -t en --server 192.168.1.100
 
 # 2. 试听 segments/non_speech_vocal_events/ 下的片段
-#    发现 0003_sigh_00250000_00252000.mp3 是误判（实际是正常说话）
+#    发现 25.290.mp3 是误判（实际是正常说话）
 #    删除该 mp3 文件
 
 # 3. 编辑重跑--服务端删除该片段并重新混音

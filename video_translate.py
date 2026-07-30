@@ -30,7 +30,14 @@ from pathlib import Path
 
 
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
-from Common.config import FINAL_AUDIO_FILENAME, build_segments_dir
+from Common.config import (
+    FINAL_AUDIO_FILENAME,
+    TTS_MAX_AUDIO_SLOWDOWN_PCT,
+    TTS_MAX_AUDIO_SPEEDUP_PCT,
+    TTS_AWARE_MIN_CANDIDATE_COUNT,
+    TTS_AWARE_MAX_DURATION_RETRIES,
+    build_segments_dir,
+)
 from Common.language_map import get_language_dir_name, normalize_target_language_codes
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from Common.config import build_compressed_upload_path, build_translated_output_path
@@ -105,14 +112,15 @@ def process_video_pipeline(
     source: str = "zh",
     separate: bool = True,
     detect_nonverbal_and_singing: bool = True,
+    extract_residual_noise: bool = True,
     denoise: str = "aggressive",
     asr_mode: str = "precise",
     translation_models: str = "",
     translation_mode: str = "tts_aware",
-    tts_aware_max_retries: int = 10,
-    tts_max_audio_slowdown_pct: float = 0.2,
-    tts_max_audio_speedup_pct: float = 0.2,
-    tts_aware_min_candidate_count: int = 3,
+    tts_aware_max_retries: int = TTS_AWARE_MAX_DURATION_RETRIES,
+    tts_max_audio_slowdown_pct: float = TTS_MAX_AUDIO_SLOWDOWN_PCT,
+    tts_max_audio_speedup_pct: float = TTS_MAX_AUDIO_SPEEDUP_PCT,
+    tts_aware_min_candidate_count: int = TTS_AWARE_MIN_CANDIDATE_COUNT,
     extra_translation_guideline: str | None = None,
     enable_visual_diarization: bool = False,
     edit_rerun: bool = False,
@@ -254,6 +262,8 @@ def process_video_pipeline(
             audio_argv.append("--no-separate")
         if not detect_nonverbal_and_singing:
             audio_argv.append("--no-detect-nonverbal-and-singing")
+        if not extract_residual_noise:
+            audio_argv.append("--no-extract-residual-noise")
         audio_argv.extend(["--denoise", denoise])
         audio_argv.extend(["--asr-mode", asr_mode])
         if translation_models:
@@ -313,10 +323,8 @@ def process_video_pipeline(
     if stop_after_translation:
         _log("--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
         _log("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
-        if not keep_server_files:
-            _archive_task_after_pipeline(video_data, server_url)
-        else:
-            _log("[调试模式] 保留服务端任务文件，跳过归档。")
+        # 流水线未跑完（中间状态），不归档、不删除服务端文件，以便后续继续运行
+        _log("[stop-after-translation] 流水线未完成，保留服务端任务文件以便后续继续运行。")
         return
 
     _log("--- Step 3: 合并音轨 ---")
@@ -388,10 +396,13 @@ def main():
     p.add_argument('--separate', action=argparse.BooleanOptionalAction, default=True,
                    help='是否运行人声分离以去除背景音。默认开启；传 --no-separate 关闭，跳过分离直接使用原始音频。')
     p.add_argument('--detect-nonverbal-and-singing', action=argparse.BooleanOptionalAction, default=True,
-                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，自动从 vocals 分流到背景音轨道。'
-                        '这些虽是人声但无法翻译，留在 vocals 中会污染下游 ASR。默认开启；'
+                   help='检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。'
+                        '这些虽是人声但无需翻译，适用于短剧、电影等场景。默认开启；'
                         '传 --no-detect-nonverbal-and-singing 关闭。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive', help='音频降噪类型（需要人声分离）。none=不降噪，normal=标准降噪，aggressive=激进降噪。默认：aggressive')
+    p.add_argument('--extract-residual-noise', action=argparse.BooleanOptionalAction, default=True,
+                   help='提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。'
+                        '需要启用人声分离。默认开启；传 --no-extract-residual-noise 关闭。')
     
     p.add_argument('--asr-mode', choices=['basic', 'precise'], default='precise', help='ASR 说话人切分模式: basic=ASR 自带说话人切分, precise=二次精细说话人切分（默认）')
     p.add_argument('--enable-visual-diarization', '-v', action=argparse.BooleanOptionalAction, default=False,
@@ -403,13 +414,14 @@ def main():
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
-    p.add_argument('--tts-aware-max-retries', type=int, default=10, help='TTS感知翻译中每句的自适应翻译重试次数（默认: 10）')
-    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=0.2,
-                   help='TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: 0.2')
-    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=0.2,
-                   help='TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: 0.2')
-    p.add_argument('--tts-aware-min-candidate-count', type=int, default=3,
-                   help='每个片段至少保留的合格候选音频数量（1-10）。默认: 3')
+    p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
+                   help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
+    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=TTS_MAX_AUDIO_SLOWDOWN_PCT,
+                   help=f'TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SLOWDOWN_PCT}')
+    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=TTS_MAX_AUDIO_SPEEDUP_PCT,
+                   help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
+    p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
+                   help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
 
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
@@ -428,7 +440,7 @@ def main():
     p.add_argument('--new-task', '-n', action='store_true',
                    help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
                         '在服务端创建全新任务。用于需要完全重跑的场景。')
-    p.add_argument('--keep-server-files', action='store_true',
+    p.add_argument('--keep-server-files', '-k', action='store_true',
                    help='调试用：跑完后不归档、不删除服务端任务目录，方便检查中间产物。'
                         '注意：audio_translate 已通过 --no-archive 禁止自动归档，'
                         '本参数额外跳过 video_translate 最终的归档步骤。')
@@ -479,6 +491,7 @@ def main():
             source=args.source,
             separate=args.separate,
             detect_nonverbal_and_singing=args.detect_nonverbal_and_singing,
+            extract_residual_noise=args.extract_residual_noise,
             denoise=args.denoise,
             asr_mode=args.asr_mode,
             translation_models=args.translation_models,
