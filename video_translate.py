@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -60,10 +61,22 @@ def _log(msg: str):
     print(f"[{timestamp}] {msg}", flush=True)
 
 
-def _archive_task_after_pipeline(video_data: dict[Path, dict], server_url: str):
+def _format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS。"""
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _archive_task_after_pipeline(
+    video_data: dict[Path, dict],
+    server_url: str,
+    task_id_dir: Path | None = None,
+):
     """在视频翻译流水线全部完成后，归档服务端任务到 US3。
 
-    从第一个视频的 .vt_task_id 文件读取 task_id，
+    从 .vt_task_id 文件读取 task_id（批量模式从 task_id_dir 读取），
     通知服务端上传到 US3 并删除本地文件。
     归档失败不影响已下载的翻译结果，仅打印警告。
     """
@@ -74,7 +87,7 @@ def _archive_task_after_pipeline(video_data: dict[Path, dict], server_url: str):
         from remote_client import RemoteScriptClient
 
         first_video = next(iter(video_data))
-        task_id = _load_task_id(first_video)
+        task_id = _load_task_id(first_video, task_id_dir=task_id_dir)
         if not task_id:
             print("[归档] 未找到 task_id，跳过归档")
             return
@@ -127,6 +140,7 @@ def process_video_pipeline(
     stop_after_translation: bool = False,
     new_task: bool = False,
     keep_server_files: bool = False,
+    task_id_dir: Path | None = None,
 ):
     """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
 
@@ -150,11 +164,24 @@ def process_video_pipeline(
 
     target_codes = normalize_target_language_codes(targets)
 
+    pipeline_start = time.perf_counter()
+    step_start = time.perf_counter()
+
     # ── Step 1: 准备上传素材 ───────────────────────────────
     # - 默认走"本地抽 mp3 -> 上传 mp3"路径，省带宽
     # - 开启 enable_visual_diarization 则直接上传 mp4，让服务端在 diarization 阶段使用视觉信息
     _log("--- Step 1: 准备上传素材 ---")
     video_data: dict[Path, dict] = {}
+
+    # 批量模式 + 新任务：统一删除 task_id_dir 下的 .vt_task_id 文件
+    if new_task and task_id_dir is not None:
+        batch_task_id_file = task_id_dir / ".vt_task_id"
+        if batch_task_id_file.exists():
+            try:
+                batch_task_id_file.unlink()
+                print(f"[新任务] 删除批量任务ID文件: {batch_task_id_file}")
+            except OSError as e:
+                print(f"[警告] 无法删除 {batch_task_id_file}: {e}")
 
     for video_path in video_paths:
         if not video_path.exists():
@@ -194,13 +221,15 @@ def process_video_pipeline(
                     print(f"[警告] 无法删除 {segments_dir.name}: {e}")
 
             # 删除 .vt_task_id 文件（强制服务端创建新任务）
-            task_id_file = video_path.parent / ".vt_task_id"
-            if task_id_file.exists():
-                try:
-                    task_id_file.unlink()
-                    print(f"[新任务] 删除任务ID文件: {task_id_file.name}")
-                except OSError as e:
-                    print(f"[警告] 无法删除 {task_id_file.name}: {e}")
+            # 批量模式（task_id_dir 不为 None）由循环外统一删除，此处跳过
+            if task_id_dir is None:
+                task_id_file = video_path.parent / ".vt_task_id"
+                if task_id_file.exists():
+                    try:
+                        task_id_file.unlink()
+                        print(f"[新任务] 删除任务ID文件: {task_id_file.name}")
+                    except OSError as e:
+                        print(f"[警告] 无法删除 {task_id_file.name}: {e}")
 
         # 检查是否所有目标语言的视频都已存在
         if all(
@@ -244,6 +273,9 @@ def process_video_pipeline(
                 except Exception as e:
                     print(f"提取音频失败 {video_path}: {e}")
                     del video_data[video_path]
+
+    _log(f"Step 1 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
 
     # ── Step 2: 远程音频翻译（直接调用 audio_translate.main()）──
     # 注意：不使用 subprocess，否则 Windows 下 Ctrl+C 无法传递给子进程
@@ -297,6 +329,10 @@ def process_video_pipeline(
         if new_task:
             audio_argv.append("--new-task")
 
+        # 批量模式：指定统一的 task_id 存放目录
+        if task_id_dir is not None:
+            audio_argv.extend(["--task-id-dir", str(task_id_dir)])
+
         # video_translate.py 在视频合并后自行归档，audio_translate 不自动归档
         audio_argv.append("--no-archive")
 
@@ -318,6 +354,8 @@ def process_video_pipeline(
         finally:
             sys.argv = original_argv
 
+    _log(f"Step 2 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+
     # ── Step 3: 合并音轨（视频画面保持原速，不做任何切分/调速）──────────
     # stop_after_translation 模式下没有 final.mp3，跳过音轨合并
     if stop_after_translation:
@@ -325,8 +363,10 @@ def process_video_pipeline(
         _log("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
         # 流水线未跑完（中间状态），不归档、不删除服务端文件，以便后续继续运行
         _log("[stop-after-translation] 流水线未完成，保留服务端任务文件以便后续继续运行。")
+        _log(f"流水线总耗时: {_format_duration(time.perf_counter() - pipeline_start)}")
         return
 
+    step_start = time.perf_counter()
     _log("--- Step 3: 合并音轨 ---")
 
     # 合成前同步检查：确保本地文件与服务端一致（所有模式统一执行）
@@ -337,7 +377,7 @@ def process_video_pipeline(
         from audio_translate import _sync_files, _compute_dest_dir, _load_task_id
         sync_client = RemoteScriptClient(server_url)
         for video_path in video_data:
-            task_id = _load_task_id(video_path)
+            task_id = _load_task_id(video_path, task_id_dir=task_id_dir)
             if task_id:
                 dest_dir = _compute_dest_dir(video_path)
                 _sync_files(sync_client, task_id, video_path.parent,
@@ -375,9 +415,12 @@ def process_video_pipeline(
 
     # 所有视频合并完成后，归档服务端任务到 US3
     if not keep_server_files:
-        _archive_task_after_pipeline(video_data, server_url)
+        _archive_task_after_pipeline(video_data, server_url, task_id_dir=task_id_dir)
     else:
         _log("[调试模式] 保留服务端任务文件，跳过归档。")
+
+    _log(f"Step 3 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    _log(f"流水线总耗时: {_format_duration(time.perf_counter() - pipeline_start)}")
 
 
 # ============================================================

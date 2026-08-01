@@ -90,6 +90,14 @@ def _log(msg: str):
     print(f"[{timestamp}] {msg}", flush=True)
 
 
+def _format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS。"""
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 # ─── 辅助函数 ─────────────────────────────────────────────
 
 def _build_remote_args(args, ref_audio_filename: str) -> list[str]:
@@ -297,7 +305,8 @@ def process_voice_replace_pipeline(
     edit_rerun: bool = False,
 ):
     """视频音色替换主流程：提取音频 -> 上传 -> 远程替换 -> 下载 -> mux。"""
-    task_start_time = time.time()
+    pipeline_start = time.perf_counter()
+    step_start = time.perf_counter()
 
     client = RemoteScriptClient(server_url)
 
@@ -345,6 +354,9 @@ def process_voice_replace_pipeline(
     if not video_data:
         print("无待处理文件。")
         return
+
+    _log(f"Step 1 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
 
     # ── Step 2: 上传文件 ─────────────────────────────────────
     _log("--- Step 2: 上传文件 ---")
@@ -467,6 +479,9 @@ def process_voice_replace_pipeline(
         _detect_and_apply_edits_voice_replace(client, task_id, input_paths, source)
         _log("--- 编辑重跑预处理完成 ---")
 
+    _log(f"Step 2 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
+
     # ── Step 3: 远程执行 ─────────────────────────────────────
     _log("--- Step 3: 远程音色替换 ---")
 
@@ -501,11 +516,45 @@ def process_voice_replace_pipeline(
         p = data["upload"]
         input_sync_info.append((p.parent, _compute_dest_dir(p)))
 
+    # 流水线阶段计时跟踪
+    _stage_state = {'name': None, 'start': None, 'timings': []}
+    _STAGE_EXCLUDE_KW = ('取消', '跳过', 'ERROR', '编辑重跑', '任务已')
+
+    def _check_stage_marker(line: str):
+        """检测服务端 >>> 阶段标记，记录上一阶段耗时。"""
+        if not line.startswith('>>> '):
+            return
+        content = line[4:].strip()
+        if any(kw in content for kw in _STAGE_EXCLUDE_KW):
+            return
+        now = time.perf_counter()
+        if _stage_state['start'] is not None and _stage_state['name'] is not None:
+            dur = now - _stage_state['start']
+            _stage_state['timings'].append((_stage_state['name'], dur))
+            _log(f"  {_stage_state['name']} 完成，耗时 {_format_duration(dur)}")
+        _stage_state['name'] = content
+        _stage_state['start'] = now
+
+    def _log_stage_summary():
+        """记录最后阶段耗时并打印汇总。"""
+        if _stage_state['start'] is not None and _stage_state['name'] is not None:
+            dur = time.perf_counter() - _stage_state['start']
+            _stage_state['timings'].append((_stage_state['name'], dur))
+            _log(f"  {_stage_state['name']} 完成，耗时 {_format_duration(dur)}")
+            _stage_state['start'] = None
+            _stage_state['name'] = None
+        if _stage_state['timings']:
+            _log("--- 远程流水线阶段耗时 ---")
+            for name, dur in _stage_state['timings']:
+                _log(f"  {name}: {_format_duration(dur)}")
+
     def on_progress(status_info):
         nonlocal last_sync_check
         stdout = status_info.get("stdout", "")
         if stdout:
             print(stdout, end='', flush=True)
+            for line in stdout.splitlines():
+                _check_stage_marker(line)
 
         now = time.time()
         if now - last_sync_check >= 3.0:
@@ -519,6 +568,7 @@ def process_voice_replace_pipeline(
     try:
         client.wait(task_id, poll_interval=2.0, on_progress=on_progress)
     except KeyboardInterrupt:
+        _log_stage_summary()
         _log(f"中断信号收到，正在取消服务端任务 {task_id}...")
         try:
             result = client.cancel(task_id)
@@ -529,6 +579,7 @@ def process_voice_replace_pipeline(
         _log(f"task_id={task_id} 已保存，重跑可恢复。")
         sys.exit(130)
     except RuntimeError as e:
+        _log_stage_summary()
         _log(f"任务失败: {e}")
         sys.exit(1)
     except TimeoutError as e:
@@ -545,6 +596,10 @@ def process_voice_replace_pipeline(
         except Exception:
             print(f"  无法查询服务端状态，task_id={task_id} 已保存，可重新运行此命令恢复。")
         sys.exit(1)
+
+    _log(f"Step 3 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    _log_stage_summary()
+    step_start = time.perf_counter()
 
     # ── 最终全量同步 ─────────────────────────────────────────
     _log("--- Step 4: 下载结果 ---")
@@ -580,6 +635,9 @@ def process_voice_replace_pipeline(
     for local_dir, dest_dir in input_sync_info:
         _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0, cleanup_stale=True)
 
+    _log(f"Step 4 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
+
     # ── Step 5: 替换视频音轨 ─────────────────────────────────
     _log("--- Step 5: 替换视频音轨 ---")
 
@@ -613,10 +671,8 @@ def process_voice_replace_pipeline(
         except Exception as e:
             print(f"[错误] 处理 {video_path.name} 失败: {e}")
 
-    elapsed = time.time() - task_start_time
-    mins, secs = divmod(int(elapsed), 60)
-    hours, mins = divmod(mins, 60)
-    _log(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
+    _log(f"Step 5 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    _log(f"流水线总耗时: {_format_duration(time.perf_counter() - pipeline_start)}")
 
 
 # ============================================================

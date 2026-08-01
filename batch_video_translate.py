@@ -180,7 +180,7 @@ def validate_independent_dirs(videos: list[Path]) -> None:
                 print(f"    - {vp.name}")
         print()
         print('每个视频文件必须在独立目录下，且同一批量任务中各目录名不能重复，')
-        print('否则翻译中间结果（segments/、.vt_task_id 等）会互相覆盖导致错乱。')
+        print('否则翻译中间结果（segments/ 等）会互相覆盖导致错乱。')
         print()
         print('推荐做法：将每集放入独立子目录，目录名和文件名用集号对应，如：')
         print('  短剧/1/1.mp4')
@@ -343,7 +343,8 @@ def main():
                         '核心用途：翻译文本后人工介入检查，确认无误后再继续后续流程。')
     p.add_argument('--new-task', '-n', action='store_true',
                    help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
-                        '在服务端创建全新任务。用于需要完全重跑的场景。')
+                        '在服务端创建全新任务。用于需要完全重跑的场景。'
+                        '批量模式下删除的是根目录下的统一 .vt_task_id 文件。')
 
     args = p.parse_args()
 
@@ -361,6 +362,7 @@ def main():
         sys.exit(1)
 
     # ── Step 1: 递归扫描目录，发现视频文件 ──────────────────
+    step_start = perf_counter()
     _log(f"--- Step 1: 扫描目录 ---")
     _log(f"扫描目录: {root_dir}")
     videos = scan_videos_recursive(root_dir)
@@ -373,15 +375,24 @@ def main():
     # 去重同目录下的 stem 变种（如原视频 + 未登记的派生文件）
     videos = dedup_stem_variants(videos)
 
+    _log(f"Step 1 完成，耗时 {_format_seconds(perf_counter() - step_start)}")
+    step_start = perf_counter()
+
     # ── Step 2: 校验 ────────────────────────────────────────
     _log("--- Step 2: 校验视频目录 ---")
     validate_independent_dirs(videos)
     validate_unique_dir_names(videos)
     check_srt_files(videos)
 
+    _log(f"Step 2 完成，耗时 {_format_seconds(perf_counter() - step_start)}")
+    step_start = perf_counter()
+
     # ── Step 3: 视频时长统计 ────────────────────────────────
     _log("--- Step 3: 视频时长统计 ---")
     total_duration = print_video_summary(videos)
+
+    _log(f"Step 3 完成，耗时 {_format_seconds(perf_counter() - step_start)}")
+    step_start = perf_counter()
 
     # ── Step 4: 单次调用 process_video_pipeline ─────────────
     targets = normalize_target_language_codes(args.targets)
@@ -416,6 +427,7 @@ def main():
             edit_rerun=args.edit_rerun,
             stop_after_translation=args.stop_after_translation,
             new_task=args.new_task,
+            task_id_dir=root_dir,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，批量视频翻译流程已中断。")
@@ -427,6 +439,7 @@ def main():
         sys.exit(1)
 
     # ── Step 5: 批量计时报告 ────────────────────────────────
+    _log(f"Step 4 完成，耗时 {_format_seconds(perf_counter() - step_start)}")
     batch_elapsed = perf_counter() - batch_start_counter
     batch_end_time = datetime.now()
     print_batch_timing(batch_start_time, batch_end_time, batch_elapsed, total_duration)

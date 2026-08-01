@@ -52,26 +52,51 @@ def _log(msg: str):
     print(f"[{timestamp}] {msg}", flush=True)
 
 
+def _format_duration(seconds: float) -> str:
+    """将秒数格式化为 HH:MM:SS。"""
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 # ─── task_id 持久化 ───────────────────────────────────────
 
 TASK_ID_FILENAME = ".vt_task_id"
 
 
-def _save_task_id(audio_path: Path, task_id: str):
-    """将 task_id 保存到音频文件旁边的 .vt_task_id 文件"""
-    marker = audio_path.parent / TASK_ID_FILENAME
+def _get_task_id_marker(audio_path: Path, task_id_dir: Path | None = None) -> Path:
+    """返回 .vt_task_id 文件路径。
+
+    task_id_dir 优先（批量模式：统一存放在根目录），
+    否则回退到 audio_path.parent（单视频模式：每个视频目录各一个）。
+    """
+    if task_id_dir is not None:
+        return task_id_dir / TASK_ID_FILENAME
+    return audio_path.parent / TASK_ID_FILENAME
+
+
+def _save_task_id(audio_path: Path, task_id: str, task_id_dir: Path | None = None):
+    """将 task_id 保存到 .vt_task_id 文件"""
+    marker = _get_task_id_marker(audio_path, task_id_dir)
     marker.write_text(task_id, encoding="utf-8")
 
 
-def _save_task_id_all(input_paths: list[Path], task_id: str):
-    """将同一个 task_id 保存到所有输入文件所在目录的 .vt_task_id 文件"""
-    for p in input_paths:
-        _save_task_id(p, task_id)
+def _save_task_id_all(input_paths: list[Path], task_id: str, task_id_dir: Path | None = None):
+    """将同一个 task_id 保存到所有输入文件所在目录的 .vt_task_id 文件。
+
+    task_id_dir 不为 None 时（批量模式），只写一个文件到 task_id_dir。
+    """
+    if task_id_dir is not None:
+        _save_task_id(input_paths[0], task_id, task_id_dir)
+    else:
+        for p in input_paths:
+            _save_task_id(p, task_id)
 
 
-def _load_task_id(audio_path: Path) -> str | None:
-    """从音频文件旁读取之前保存的 task_id"""
-    marker = audio_path.parent / TASK_ID_FILENAME
+def _load_task_id(audio_path: Path, task_id_dir: Path | None = None) -> str | None:
+    """从 .vt_task_id 文件读取之前保存的 task_id"""
+    marker = _get_task_id_marker(audio_path, task_id_dir)
     if marker.exists():
         task_id = marker.read_text(encoding="utf-8").strip()
         if task_id:
@@ -79,8 +104,10 @@ def _load_task_id(audio_path: Path) -> str | None:
     return None
 
 
-def _validate_task_ids(input_paths: list[Path]) -> str | None:
+def _validate_task_ids(input_paths: list[Path], task_id_dir: Path | None = None) -> str | None:
     """检查所有输入文件目录下的 .vt_task_id 是否一致。
+
+    task_id_dir 不为 None 时（批量模式），只检查 task_id_dir/.vt_task_id 一个文件。
 
     返回:
         一致的 task_id（所有目录都有且相同时）
@@ -89,6 +116,10 @@ def _validate_task_ids(input_paths: list[Path]) -> str | None:
     异常退出:
         如果某些目录有、某些没有，或 task_id 不一致，报错退出。
     """
+    # 批量模式：单一文件，无需校验一致性
+    if task_id_dir is not None:
+        return _load_task_id(input_paths[0], task_id_dir)
+
     dir_task_ids: dict[str, str | None] = {}  # {目录绝对路径: task_id 或 None}
     for p in input_paths:
         dir_key = str(p.resolve().parent)
@@ -695,11 +726,15 @@ def main():
     # 内部参数：仅供 video_translate.py 传入，指定本地路径到服务端文件名的映射（JSON）。
     # 用于视觉 diarization 模式：本地压缩为 _upload_480p.mp4，但上传时用原文件名，保持 stem 一致。
     p.add_argument('--upload-as', default=None, help=argparse.SUPPRESS)
+    # 内部参数：仅供 batch_video_translate.py 传入，指定 .vt_task_id 的统一存放目录。
+    # 批量模式下，task_id 只写一个文件到该目录，而非每个视频目录各一份。
+    p.add_argument('--task-id-dir', default=None, help=argparse.SUPPRESS)
     # 内部参数：仅供客户端 video_translate.py 透传给服务端；不在 --help 中展示，
     # 终端用户不应通过 audio_translate 的命令行使用此开关（它要求输入是视频，与音频翻译入口职责冲突）。
     args = p.parse_args()
 
-    task_start_time = time.time()
+    pipeline_start = time.perf_counter()
+    step_start = time.perf_counter()
 
     # 解析 --upload-as 映射：本地路径 -> 服务端文件名
     # 用于视觉 diarization 模式：本地压缩为 _upload_480p.mp4，上传时用原文件名保持 stem 一致
@@ -708,6 +743,9 @@ def main():
         import json
         upload_as_map = json.loads(args.upload_as)
     args._upload_as_map = upload_as_map
+
+    # 解析 --task-id-dir：批量模式下 .vt_task_id 的统一存放目录
+    task_id_dir = Path(args.task_id_dir) if args.task_id_dir else None
 
     # 解析服务端地址：--scheduler 由调度器分配空闲节点，--server 直连（老模式）
     try:
@@ -740,7 +778,7 @@ def main():
 
     task_id = None
     if not args.new_task:
-        task_id = _validate_task_ids(input_paths)
+        task_id = _validate_task_ids(input_paths, task_id_dir=task_id_dir)
         if task_id:
             if client.task_exists(task_id):
                 _log(f"发现已保存的 task_id={task_id}，复用该任务继续跑...")
@@ -802,7 +840,6 @@ def main():
                 pass  # 子目录不存在时不阻断，走全量上传
 
     # 上传进度跟踪
-    upload_start_time = time.time()
     upload_count = 0
     skip_count = 0
     upload_bytes = 0
@@ -845,8 +882,8 @@ def main():
         upload_bytes += local_size
         _check_upload_progress()
 
-    # 持久化 task_id（保存到所有输入文件所在目录）
-    _save_task_id_all(input_paths, task_id)
+    # 持久化 task_id（保存到所有输入文件所在目录，或批量模式的统一目录）
+    _save_task_id_all(input_paths, task_id, task_id_dir=task_id_dir)
 
     # ── 2. 自动发现并上传同名 SRT 和翻译指南 ──────────────
     for input_path in args.inputs:
@@ -886,10 +923,9 @@ def main():
                 _check_upload_progress()
 
     # 上传统计
-    upload_elapsed = time.time() - upload_start_time
-    upload_mins, upload_secs = divmod(int(upload_elapsed), 60)
     _log(f"上传完成: {upload_count} 个文件已上传, {skip_count} 个已跳过, "
-         f"总计 {upload_bytes / (1024 * 1024):.0f}MB, 耗时 {upload_mins}分{upload_secs}秒")
+         f"总计 {upload_bytes / (1024 * 1024):.0f}MB, 耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
 
     # ── 2b. 上传后校验 ─────────────────────────────────────
     # 逐子目录查询服务端文件列表，确认所有音频 + SRT 都已到位。
@@ -942,6 +978,9 @@ def main():
             compute_dest_dir=_compute_dest_dir,
         )
 
+    _log(f"校验 + 预处理完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    step_start = time.perf_counter()
+
     # ── 3. 远程执行 ─────────────────────────────────────────
     remote_args = _build_remote_args(args)
 
@@ -981,6 +1020,38 @@ def main():
         p = Path(input_path)
         input_sync_info.append((p.parent, _compute_dest_dir(p)))
 
+    # 流水线阶段计时跟踪
+    _stage_state = {'name': None, 'start': None, 'timings': []}
+    _STAGE_EXCLUDE_KW = ('取消', '跳过', 'ERROR', '编辑重跑', '任务已')
+
+    def _check_stage_marker(line: str):
+        """检测服务端 >>> 阶段标记，记录上一阶段耗时。"""
+        if not line.startswith('>>> '):
+            return
+        content = line[4:].strip()
+        if any(kw in content for kw in _STAGE_EXCLUDE_KW):
+            return
+        now = time.perf_counter()
+        if _stage_state['start'] is not None and _stage_state['name'] is not None:
+            dur = now - _stage_state['start']
+            _stage_state['timings'].append((_stage_state['name'], dur))
+            _log(f"  {_stage_state['name']} 完成，耗时 {_format_duration(dur)}")
+        _stage_state['name'] = content
+        _stage_state['start'] = now
+
+    def _log_stage_summary():
+        """记录最后阶段耗时并打印汇总。"""
+        if _stage_state['start'] is not None and _stage_state['name'] is not None:
+            dur = time.perf_counter() - _stage_state['start']
+            _stage_state['timings'].append((_stage_state['name'], dur))
+            _log(f"  {_stage_state['name']} 完成，耗时 {_format_duration(dur)}")
+            _stage_state['start'] = None
+            _stage_state['name'] = None
+        if _stage_state['timings']:
+            _log("--- 远程流水线阶段耗时 ---")
+            for name, dur in _stage_state['timings']:
+                _log(f"  {name}: {_format_duration(dur)}")
+
     def on_progress(status_info):
         nonlocal last_sync_check, last_line
 
@@ -989,6 +1060,8 @@ def main():
         if stdout:
             print(stdout, end='', flush=True)
             last_stdout_lines.extend(stdout.splitlines())
+            for line in stdout.splitlines():
+                _check_stage_marker(line)
         last_line = status_info.get("total_lines", last_line)
 
         # 每 3 秒全量扫描下载：确保之前下载失败的文件被重试
@@ -1007,6 +1080,7 @@ def main():
     try:
         client.wait(task_id, poll_interval=2.0, on_progress=on_progress)
     except KeyboardInterrupt:
+        _log_stage_summary()
         # 捕获 Ctrl+C：通知服务端取消任务，然后退出
         _log(f"中断信号收到，正在取消服务端任务 {task_id}...")
         try:
@@ -1019,6 +1093,7 @@ def main():
         print(f"task_id={task_id} 已保存，重跑可恢复。")
         sys.exit(130)
     except RuntimeError as e:
+        _log_stage_summary()
         # 尝试从已捕获的 stdout 中解析服务端输出的错误代码
         error_code, error_msg = _parse_error_code(last_stdout_lines)
         if error_code:
@@ -1050,6 +1125,10 @@ def main():
         except Exception:
             print(f"  无法查询服务端状态，task_id={task_id} 已保存，可重新运行此命令恢复。")
         sys.exit(1)
+
+    _log(f"远程执行完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    _log_stage_summary()
+    step_start = time.perf_counter()
 
     # ── 5. 最终全量同步（带验证和重试） ─────────────────────
     MAX_SYNC_ROUNDS = 3
@@ -1108,13 +1187,12 @@ def main():
         print(f"task_id={task_id} 已保存。")
         sys.exit(1)
 
-    elapsed = time.time() - task_start_time
-    mins, secs = divmod(int(elapsed), 60)
-    hours, mins = divmod(mins, 60)
     _log(f"所有文件同步完成，客户端与服务端文件一一对应。")
-    _log(f"任务处理总耗时: {hours}小时{mins}分{secs}秒")
+    _log(f"文件同步完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
 
 
+
+    step_start = time.perf_counter()
 
     # ── 7. 归档任务到 US3（可选）──────────────────────────
     # 客户端已下载并校验完所有文件后，通知服务端上传到 US3 并删除本地文件
@@ -1139,6 +1217,10 @@ def main():
         except Exception as e:
             print(f"[警告] 归档请求失败：{e}")
             print(f"服务端本地文件已保留，不影响已下载的翻译结果。")
+
+    if not args.no_archive:
+        _log(f"归档完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
+    _log(f"任务总耗时: {_format_duration(time.perf_counter() - pipeline_start)}")
 
 
 if __name__ == '__main__':
