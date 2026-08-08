@@ -59,7 +59,13 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 # 多个视频 + 多个语种
 python video_translate.py "1.mp4" "2.mp4" -t en hi ja --server <ServerIP>
+
+# 源视频为其他语言（非中文/英文），必须用 -s 指定源语言代码
+python video_translate.py "1.mp4" -s ja -t en --server <ServerIP>   # 日语视频翻译成英语
+python video_translate.py "1.mp4" -s ko -t zh --server <ServerIP>   # 韩语视频翻译成中文
 ```
+
+> ⚠️ **源语言参数 `-s`**：默认值为 `zh`（中文），中文和英文视频可不指定。**如果源视频是其他语言（日语、韩语、法语等），必须用 `-s` 指定源语言代码**，否则 ASR 会按中文识别，导致识别失败或乱码。支持的语言代码见 [支持的语种](#3-支持的语种)。
 
 ### 2. 翻译音频
 
@@ -202,17 +208,47 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 
 ### 3. 支持的语种
 
-**输入语种（源语言）**：中文、英语及多种中国方言
+**输入语种（源语言）**：中文、26 种中国方言及 28 种外语
+
+**外语**：
 
 | 代码 | 语言 | | 代码 | 语言 |
 |------|------|-|------|------|
-| `zh` | 中文 | | `en` | English |
-| `cantonese` | 粤语 | | `minnan` | 闽南语 |
-| `sichuan` | 四川话 | | `shanghai` | 上海话 |
-| `dongbei` | 东北话 | | `wu` | 吴语 |
-| `henan` | 河南话 | | `shaanxi` | 陕西话 |
+| `ar` | Arabic | | `it` | Italian |
+| `cs` | Czech | | `ja` | Japanese |
+| `da` | Danish | | `ko` | Korean |
+| `de` | German | | `mk` | Macedonian |
+| `el` | Greek | | `ms` | Malay |
+| `en` | English | | `nl` | Dutch |
+| `es` | Spanish | | `pl` | Polish |
+| `fa` | Persian | | `pt` | Portuguese |
+| `fi` | Finnish | | `ro` | Romanian |
+| `fil` | Filipino | | `ru` | Russian |
+| `fr` | French | | `sv` | Swedish |
+| `hi` | Hindi | | `th` | Thai |
+| `hu` | Hungarian | | `tr` | Turkish |
+| `id` | Indonesian | | `vi` | Vietnamese |
 
-> 完整列表见 [asr_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/asr_languages.py)
+**中文及方言**：
+
+| 代码 | 语言 | | 代码 | 语言 |
+|------|------|-|------|------|
+| `zh` | 中文 | | `liaoning` | 辽宁话 |
+| `anhui` | 安徽话 | | `minnan` | 闽南语 |
+| `cantonese` | 粤语 | | `ningxia` | 宁夏话 |
+| `cantonese-gd` | 粤语（广东） | | `shaanxi` | 陕西话 |
+| `cantonese-hk` | 粤语（香港） | | `shandong` | 山东话 |
+| `dongbei` | 东北话 | | `shanghai` | 上海话 |
+| `fujian` | 福建话 | | `shanxi` | 山西话 |
+| `gansu` | 甘肃话 | | `sichuan` | 四川话 |
+| `guizhou` | 贵州话 | | `tianjin` | 天津话 |
+| `hebei` | 河北话 | | `wu` | 吴语 |
+| `henan` | 河南话 | | `yue` | 粤语 |
+| `hubei` | 湖北话 | | `yunnan` | 云南话 |
+| `hunan` | 湖南话 | | `zhejiang` | 浙江话 |
+| `jiangxi` | 江西话 | | | |
+
+> `zh-cn`、`zh-tw` 为 `zh` 的别名。完整列表见 [asr_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/asr_languages.py)
 
 **输出语种（目标语言）**：支持 80+ 种语言
 
@@ -265,6 +301,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| `-s` / `--source` | 源语言代码。中文和英文视频可不指定；**其他语言（日语、韩语、法语等）必须指定**，否则 ASR 按中文识别导致失败。代码见[支持的语种](#3-支持的语种) | `zh` |
 | `--separate` / `--no-separate` | 是否启用人声分离（去背景音）。默认开启；传 `--no-separate` 关闭。 | 启用 |
 | `--detect-nonverbal-and-singing` / `--no-detect-nonverbal-and-singing` | 检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。这些虽是人声但无需翻译，适用于短剧、电影等场景。默认开启；传 `--no-detect-nonverbal-and-singing` 关闭。 | 启用 |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
