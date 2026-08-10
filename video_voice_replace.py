@@ -123,6 +123,10 @@ def _build_remote_args(args, ref_audio_filename: str) -> list[str]:
     # 降噪
     remote_args.extend(['--denoise', args.denoise])
 
+    # ASR 候选重选（默认关闭，仅在显式开启时透传）
+    if getattr(args, 'asr_reselect', False):
+        remote_args.append('--asr-reselect')
+
     return remote_args
 
 
@@ -303,6 +307,7 @@ def process_voice_replace_pipeline(
     denoise: str = "aggressive",
     new_task: bool = False,
     edit_rerun: bool = False,
+    asr_reselect: bool = False,
 ):
     """视频音色替换主流程：提取音频 -> 上传 -> 远程替换 -> 下载 -> mux。"""
     pipeline_start = time.perf_counter()
@@ -494,6 +499,7 @@ def process_voice_replace_pipeline(
     args.source = source
     args.separate = separate
     args.denoise = denoise
+    args.asr_reselect = asr_reselect
 
     remote_args = _build_remote_args(args, ref_filename)
     video_summary = _compute_video_summary([Path(p) for p in args.inputs])
@@ -693,6 +699,10 @@ def main():
                         '开启后 TTS 合成人声会与背景音混音输出 final.mp3；关闭时直接使用 combined.mp3。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive',
                    help='降噪类型（需要人声分离）。默认：aggressive')
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+                   help='在所有段 TTS 合成完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
+                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭。'
+                        '传 --asr-reselect 启用二次验证。')
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
                               help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
@@ -750,6 +760,7 @@ def main():
         denoise=args.denoise,
         new_task=args.new_task,
         edit_rerun=args.edit_rerun,
+        asr_reselect=args.asr_reselect,
     )
 
 

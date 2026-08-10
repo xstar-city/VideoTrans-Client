@@ -23,6 +23,7 @@
 | 删语种         | 删除本地语言目录（如 English/）         | 本地目录不存在                       | 删除服务端对应语言目录                                                  |
 | 删某句合成音频  | 删除 segments/{lang}/{stem}.mp3       | 本地合成音频 mp3 缺失                | 删除服务端对应合成音频 mp3 + 翻译候选 md + 候选目录                      |
 | 删某句翻译文本  | 删除 segments/{lang}/{stem}.txt       | 本地翻译文本缺失                     | 删除服务端对应翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录              |
+| 删ASR句子      | 删除 segments/ASR/{stem}.txt 或 segments/{stem}.mp3 | 本地 ASR txt 或原声音频 mp3 缺失 | 删除服务端 ASR txt + 原声音频 mp3 + 所有语言目录下翻译文本 + 合成音频 mp3 + 翻译候选 md + 候选目录 |
 | 改翻译字幕    | 编辑 segments/{lang}/full_translation.srt | 下载服务端 SRT 对比，内容不一致       | 上传 SRT；解析 SRT 将文本写回对应 txt 并上传；删除对应 TTS 产物 + combined/final；忽略 txt 的独立修改 |
 | 改翻译指南    | 编辑 segments/{lang}/translation_guidelines.txt | 下载服务端指南对比，内容不一致    | 上传新指南；删除该语言目录下所有翻译 txt + TTS 产物 + combined/final，强制重新翻译 |
 | 删非语音片段   | 删除 segments/non_speech_vocal_events/{clip}.mp3 | 本地片段缺失               | 删除服务端对应片段 + 删除所有语言 final.mp3 触发重新混音                  |
@@ -282,6 +283,7 @@ _ACTION_LABELS = {
     "modify_asr_srt": "改ASR字幕",
     "modify_asr_text": "改ASR文本",
     "add_asr_text": "新增ASR文本",
+    "delete_asr_sentence": "删ASR句子",
     "modify_translation": "改翻译文本",
     "replace_tts_audio": "替换合成音频",
     "delete_language": "删语种",
@@ -380,6 +382,7 @@ def _detect_and_apply_edits(
     0. 改 ASR 字幕：full_text.srt 内容不一致 -> 解析 SRT 只将文本写回 txt（保留原始时长）+ 上传 + 删除所有语言目录下游产物（同场景 1）；忽略 txt 独立修改
     1. 改 ASR 文本：内容不一致 -> 上传 ASR 文本 + 删除所有语言目录下对应 翻译文本/合成音频 mp3/翻译候选 md/候选目录
        - 若时长行（第二行）也变更 -> 额外删除 segments/{stem}.mp3 + 各语言目录下 mp3/md/候选目录，服务端重新切分
+    1b. 删 ASR 句子：本地 ASR txt 或原声音频 mp3 缺失 -> 删除 ASR txt + 原声音频 mp3 + 所有语言目录下翻译文本/合成音频 mp3/翻译候选 md/候选目录
     2. 新增 ASR txt：客户端有但服务端没有 -> 校验两行格式 + 时长 > 0.3s -> 上传（服务端自动切分 mp3）
     3. 改翻译文本：内容不一致 -> 上传翻译文本 + 删除该语言目录下对应 合成音频 mp3/翻译候选 md/候选目录
     4. 替换合成音频：文件大小不一致 -> 上传新 MP3 + 删除 combined.mp3/final.mp3 触发重新合成
@@ -405,6 +408,8 @@ def _detect_and_apply_edits(
     upload_list: list[tuple[Path, str]] = []   # (本地文件路径, 服务端相对路径)
     delete_files: list[str] = []
     delete_dirs: list[str] = []
+    # 已在 ASR 句子删除检查中用户确认过的 stem，全局删除检查时排除，避免重复确认
+    confirmed_asr_stems: set[str] = set()
 
     # 收集返修日志数据（按输入分组）
     rerun_log_groups: list[dict] = []  # [{dest_dir, input_name, changes}, ...]
@@ -414,6 +419,9 @@ def _detect_and_apply_edits(
         dest_dir = compute_dest_dir(p)
         local_segments_dir = build_segments_dir(p)
         input_changes: list[dict] = []  # 当前输入的返修变更
+        # 视频标识前缀，多视频时区分操作针对的是哪个视频
+        _vid = f"[{dest_dir}]"
+        _log(f"--- 检查编辑变更: {dest_dir} ({p.name}) ---")
 
         # ── 递归列出服务端 segments/ 目录结构 ──
         def _list_server_files(sub_dir: str, with_hash: bool = False) -> list[dict]:
@@ -430,7 +438,7 @@ def _detect_and_apply_edits(
         server_segments_items = _list_server_files(server_segments_subdir)
 
         if not server_segments_items:
-            _log(f"[错误] 服务端 {dest_dir}/segments/ 不存在或为空，"
+            _log(f"{_vid} [错误] 服务端 {dest_dir}/segments/ 不存在或为空，"
                   f"请确认任务 {task_id} 已完成过 ASR 阶段。")
             sys.exit(1)
 
@@ -458,7 +466,7 @@ def _detect_and_apply_edits(
             )
             local_asr_srt_content = local_asr_srt.read_text(encoding="utf-8")
             if server_asr_srt_content is None or local_asr_srt_content != server_asr_srt_content:
-                print(f"  [改ASR字幕] ASR/{ASR_FULL_TEXT_FILENAME} 内容已修改")
+                print(f"  {_vid} [改ASR字幕] ASR/{ASR_FULL_TEXT_FILENAME} 内容已修改")
                 asr_srt_stem_texts = []  # 收集 SRT 写回的 stem 文本变更
                 # 解析 SRT，只取文本写回 txt（不使用 SRT 时间戳，保留原始时长）
                 srt_segments = _parse_srt_to_segments(local_asr_srt_content)
@@ -506,15 +514,35 @@ def _detect_and_apply_edits(
 
         # ── 场景 1：检测 ASR 文本内容修改（跳过 SRT 已处理的 stem）──
 
+        # 被删除的 ASR 句子（服务端有 txt 或 mp3 但客户端没有）
+        # 删除 ASR txt 或删除原声音频 mp3 都触发"删ASR句子"
+        deleted_asr_stems: set[str] = set()
+
+        # 检测被删除的原声音频 mp3（服务端有但客户端没有）
+        if local_segments_dir.exists():
+            for item in server_segments_items:
+                if item.get("type") != "file":
+                    continue
+                _mp3_name = item["name"]
+                if not _mp3_name.endswith(".mp3"):
+                    continue
+                if not (local_segments_dir / _mp3_name).exists():
+                    deleted_asr_stems.add(_mp3_name.rsplit(".", 1)[0])
+
         if local_asr_dir.exists():
             for asr_txt_name in server_asr_txts:
                 local_asr_txt = local_asr_dir / asr_txt_name
                 if not local_asr_txt.exists():
-                    continue  # 客户端没有此文件，跳过（不在 ASR 层面处理删除）
+                    # 客户端没有此 ASR txt，说明用户删除了这句话
+                    deleted_asr_stems.add(asr_txt_name.rsplit(".", 1)[0])
+                    continue
 
                 stem = asr_txt_name.rsplit(".", 1)[0]
                 # SRT 已处理的 stem 跳过（文本已从 SRT 写入）
                 if stem in asr_srt_handled_stems:
+                    continue
+                # 已标记为删除的句子（mp3 被删除）跳过修改检测
+                if stem in deleted_asr_stems:
                     continue
 
                 # 下载服务端 ASR 文本内容对比
@@ -525,7 +553,7 @@ def _detect_and_apply_edits(
                 if server_content is not None and server_content != local_content:
                     changed_asr_stems.add(stem)
                     upload_list.append((local_asr_txt, remote_asr_path))
-                    print(f"  [改ASR文本] {asr_txt_name} 内容已修改")
+                    print(f"  {_vid} [改ASR文本] {asr_txt_name} 内容已修改")
                     _print_txt_diff(local_content, server_content, f"ASR/{asr_txt_name}")
 
                     # 检查时长行（第二行）是否变更 -> 需删除旧 mp3 重新切分
@@ -597,6 +625,57 @@ def _detect_and_apply_edits(
                         _local_txt.unlink()
                     _delete_local_tts_artifacts(local_lang_dir, stem)
 
+        # ── 场景 1b：处理被删除的 ASR 句子 ──
+        # 用户删除 ASR txt 或删除原声音频 mp3 都说明用户希望删除这句话，
+        # 需联动删除：ASR txt + 原声音频 mp3 + 所有语言目录下的翻译文本/合成音频/翻译候选
+
+        # 安全检查：删除 ASR 句子是少数操作，超过 10% 或 10 句时可能是本地文件未同步完整
+        # 导致的误判，要求用户确认后再执行删除
+        if deleted_asr_stems and server_asr_txts:
+            delete_ratio = len(deleted_asr_stems) / len(server_asr_txts)
+            if delete_ratio > 0.1 or len(deleted_asr_stems) > 10:
+                _log(f"{_vid} [警告] 检测到 {len(deleted_asr_stems)}/{len(server_asr_txts)} "
+                     f"({delete_ratio:.0%}) ASR 句子被标记为删除！")
+                _log(f"  这可能是因为本地 segments 文件未完整同步，而非用户主动删除。")
+                _log(f"  本地 segments 目录: {local_segments_dir}")
+                print(f"  如确认要删除这些句子，请输入 y 继续，其他输入取消: ", end="", flush=True)
+                response = input().strip().lower()
+                if response != 'y':
+                    _log(f"{_vid} 用户取消删除，跳过 {len(deleted_asr_stems)} 个 ASR 句子的删除操作。")
+                    deleted_asr_stems.clear()
+                else:
+                    confirmed_asr_stems.update(deleted_asr_stems)
+
+        for stem in sorted(deleted_asr_stems):
+            # 服务端：删除 ASR txt + 原声音频 mp3
+            delete_files.append(f"{server_asr_subdir}/{stem}.txt")
+            delete_files.append(f"{server_segments_subdir}/{stem}.mp3")
+            # 客户端：同步删除原声音频 mp3
+            _local_seg_mp3 = local_segments_dir / f"{stem}.mp3"
+            if _local_seg_mp3.exists():
+                _local_seg_mp3.unlink()
+            # 删除所有语言目录下的翻译产物
+            for code in target_codes:
+                lang_dir_name = get_language_dir_name(code)
+                server_lang_subdir = f"{server_segments_subdir}/{lang_dir_name}"
+                local_lang_dir = local_segments_dir / lang_dir_name
+                delete_files.append(f"{server_lang_subdir}/{stem}.txt")
+                delete_files.append(f"{server_lang_subdir}/{stem}.mp3")
+                delete_files.append(f"{server_lang_subdir}/{stem}.md")
+                delete_dirs.append(f"{server_lang_subdir}/{stem}")
+                # 客户端：同步删除翻译文本 + TTS 产物
+                _local_txt = local_lang_dir / f"{stem}.txt"
+                if _local_txt.exists():
+                    _local_txt.unlink()
+                _delete_local_tts_artifacts(local_lang_dir, stem)
+            print(f"  {_vid} [删ASR句子] {stem} 已删除（ASR txt + 原声音频 + 所有语言翻译产物）")
+            input_changes.append({
+                "action": "delete_asr_sentence",
+                "stem": stem,
+                "target_lang": None,
+                "details": {},
+            })
+
         # ── 场景 7：检测新增 ASR txt（客户端有但服务端没有）──
         # 用户手动拆句：修改原 txt 的文本和时长 + 新增一个 txt
         # 校验：txt 必须两行，第二行时长 > 0.3s
@@ -617,7 +696,7 @@ def _detect_and_apply_edits(
                 stem, duration_s = result
                 remote_asr_path = f"{server_asr_subdir}/{new_txt_name}"
                 upload_list.append((local_txt, remote_asr_path))
-                print(f"  [新增ASR文本] {new_txt_name}（时长 {duration_s:.3f}s）-> 服务端将自动切分 mp3")
+                print(f"  {_vid} [新增ASR文本] {new_txt_name}（时长 {duration_s:.3f}s）-> 服务端将自动切分 mp3")
                 # 收集返修日志
                 new_text = _extract_asr_text(local_txt.read_text(encoding="utf-8"))
                 input_changes.append({
@@ -651,7 +730,7 @@ def _detect_and_apply_edits(
                 if not local_clip.exists():
                     delete_files.append(f"{server_clips_subdir}/{name}")
                     deleted_names.append(name)
-                    print(f"  [{log_label}] {clips_dirname}/{name} 本地已删除，删除服务端片段")
+                    print(f"  {_vid} [{log_label}] {clips_dirname}/{name} 本地已删除，删除服务端片段")
             return deleted_names
 
         all_deleted_clips: list[tuple[str, list[str]]] = []  # [(action, clip_names), ...]
@@ -698,7 +777,7 @@ def _detect_and_apply_edits(
                 lang_items = _list_server_files(server_lang_subdir)
                 if lang_items:
                     delete_dirs.append(server_lang_subdir)
-                    print(f"  [删语种] 本地 {lang_dir_name}/ 不存在 -> 删除服务端目录")
+                    print(f"  {_vid} [删语种] 本地 {lang_dir_name}/ 不存在 -> 删除服务端目录")
                     input_changes.append({
                         "action": "delete_language",
                         "stem": None,
@@ -728,7 +807,7 @@ def _detect_and_apply_edits(
                         delete_files.append(f"{server_lang_subdir}/{stem}.md")
                         delete_dirs.append(f"{server_lang_subdir}/{stem}")
                         _delete_local_tts_artifacts(local_lang_dir, stem)
-                        print(f"  [删合成音频] {lang_dir_name}/{server_file} 本地已删除 -> 删除合成音频+翻译候选+候选目录")
+                        print(f"  {_vid} [删合成音频] {lang_dir_name}/{server_file} 本地已删除 -> 删除合成音频+翻译候选+候选目录")
                         input_changes.append({
                             "action": "delete_tts_audio",
                             "stem": stem,
@@ -746,7 +825,7 @@ def _detect_and_apply_edits(
                         delete_files.append(f"{server_lang_subdir}/{stem}.md")
                         delete_dirs.append(f"{server_lang_subdir}/{stem}")
                         _delete_local_tts_artifacts(local_lang_dir, stem)
-                        print(f"  [删翻译文本] {lang_dir_name}/{server_file} 本地已删除 -> 删除翻译文本+合成音频+翻译候选")
+                        print(f"  {_vid} [删翻译文本] {lang_dir_name}/{server_file} 本地已删除 -> 删除翻译文本+合成音频+翻译候选")
                         input_changes.append({
                             "action": "delete_translation",
                             "stem": stem,
@@ -764,7 +843,7 @@ def _detect_and_apply_edits(
                 )
                 local_srt_content = local_srt.read_text(encoding="utf-8")
                 if server_srt_content is None or local_srt_content != server_srt_content:
-                    print(f"  [改字幕] {lang_dir_name}/{FULL_TRANSLATION_SRT_FILENAME} 内容已修改")
+                    print(f"  {_vid} [改字幕] {lang_dir_name}/{FULL_TRANSLATION_SRT_FILENAME} 内容已修改")
                     # 上传 SRT 文件
                     upload_list.append((local_srt, f"{server_lang_subdir}/{FULL_TRANSLATION_SRT_FILENAME}"))
                     # 解析 SRT，将文本写回对应 txt 文件
@@ -827,7 +906,7 @@ def _detect_and_apply_edits(
                 )
                 local_guidelines_content = local_guidelines.read_text(encoding="utf-8")
                 if server_guidelines_content is None or local_guidelines_content != server_guidelines_content:
-                    print(f"  [改翻译指南] {lang_dir_name}/{TRANSLATION_GUIDELINES_FILENAME} 内容已修改")
+                    print(f"  {_vid} [改翻译指南] {lang_dir_name}/{TRANSLATION_GUIDELINES_FILENAME} 内容已修改")
                     upload_list.append((local_guidelines, f"{server_lang_subdir}/{TRANSLATION_GUIDELINES_FILENAME}"))
                     # 删除所有翻译 txt + TTS 产物，强制服务端用新指南重新翻译
                     _PROTECTED_FILES = frozenset({
@@ -905,7 +984,7 @@ def _detect_and_apply_edits(
                     delete_dirs.append(f"{server_lang_subdir}/{stem}")
                     # 客户端：同步删除 TTS 产物
                     _delete_local_tts_artifacts(local_lang_dir, stem)
-                    print(f"  [改翻译文本] {lang_dir_name}/{local_file.name} 内容已修改")
+                    print(f"  {_vid} [改翻译文本] {lang_dir_name}/{local_file.name} 内容已修改")
                     _print_txt_diff(local_content, server_content, f"{lang_dir_name}/{local_file.name}")
                     # 收集返修日志
                     input_changes.append({
@@ -963,7 +1042,7 @@ def _detect_and_apply_edits(
                     _local_f = local_lang_dir / _fname
                     if _local_f.exists():
                         _local_f.unlink()
-                print(f"  [替换合成音频] {lang_dir_name}/{local_file.name} {diff_detail}")
+                print(f"  {_vid} [替换合成音频] {lang_dir_name}/{local_file.name} {diff_detail}")
                 # 收集返修日志
                 input_changes.append({
                     "action": "replace_tts_audio",
@@ -983,6 +1062,10 @@ def _detect_and_apply_edits(
                 "input_name": p.name,
                 "changes": input_changes,
             })
+            summary = _build_change_summary(input_changes)
+            _log(f"{_vid} {summary}")
+        else:
+            _log(f"{_vid} 未检测到编辑变更")
 
     # ── 执行上传 ──
     if upload_list:
@@ -999,6 +1082,42 @@ def _detect_and_apply_edits(
                 print(f"  [错误] 上传失败 {remote_path}: {e}")
 
     # ── 执行删除 ──
+    if delete_files or delete_dirs:
+        # 安全检查：统计待删除的唯一句子 stem 数（以开始时间戳命名的文件/目录）
+        # 超过 10 个时可能是本地 segments 文件未完整同步而非主动编辑
+        # 已在 ASR 句子删除检查中确认过的 stem 不重复计数
+        deleted_sentence_stems: set[str] = set()
+        for f in delete_files:
+            filename = f.rsplit('/', 1)[-1]
+            stem = filename.rsplit('.', 1)[0] if '.' in filename else filename
+            try:
+                float(stem)
+            except ValueError:
+                continue
+            deleted_sentence_stems.add(stem)
+        for d in delete_dirs:
+            dirname = d.rsplit('/', 1)[-1]
+            try:
+                float(dirname)
+            except ValueError:
+                continue
+            deleted_sentence_stems.add(dirname)
+        unconfirmed_stems = deleted_sentence_stems - confirmed_asr_stems
+        if len(unconfirmed_stems) > 10:
+            _log(f"[警告] 本次将删除 {len(unconfirmed_stems)} 个唯一句子的相关文件，"
+                 f"数量较多，可能是本地 segments 文件未完整同步而非主动编辑。")
+            print(f"  涉及的句子（最多显示 20 个）:")
+            for stem in sorted(unconfirmed_stems)[:20]:
+                print(f"    {stem}")
+            if len(unconfirmed_stems) > 20:
+                print(f"    ... 还有 {len(unconfirmed_stems) - 20} 个句子未显示")
+            print(f"  确认删除请输入 y 继续，其他输入跳过全部删除: ", end="", flush=True)
+            response = input().strip().lower()
+            if response != 'y':
+                _log(f"用户取消删除，跳过全部删除操作。")
+                delete_files.clear()
+                delete_dirs.clear()
+
     if delete_files or delete_dirs:
         _log(f"删除 {len(delete_files)} 个文件 + {len(delete_dirs)} 个目录...")
         try:
@@ -1058,8 +1177,10 @@ def _detect_and_apply_edits(
             except Exception as e:
                 print(f"  [警告] 返修日志记录失败: {e}")
 
-    if not upload_list and not delete_files and not delete_dirs:
+    has_changes = bool(upload_list or delete_files or delete_dirs)
+    if not has_changes:
         _log("未检测到任何编辑变更，服务端文件已是最新。")
+    return has_changes
 
 
 def preprocess_edit_rerun(
@@ -1095,18 +1216,20 @@ def preprocess_edit_rerun(
     _check_server_time(client)
 
     # 验证服务端已有 segments 输出（list_files 检查）
-    first_input = input_paths[0]
-    dest_dir = compute_dest_dir(first_input)
-    segments_subdir = f"{dest_dir}/{SEGMENTS_DIRNAME}"
-    try:
-        result = client.list_files(task_id, sub_dir=segments_subdir, since=0)
-        if not result.get("items"):
-            _log(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
-                  f"请确认任务 {task_id} 已完成过 ASR 阶段。")
+    # 多视频模式下需要检查每个输入的 segments 目录
+    for input_path in input_paths:
+        p = Path(input_path)
+        dest_dir = compute_dest_dir(p)
+        segments_subdir = f"{dest_dir}/{SEGMENTS_DIRNAME}"
+        try:
+            result = client.list_files(task_id, sub_dir=segments_subdir, since=0)
+            if not result.get("items"):
+                _log(f"[错误] 服务端 {segments_subdir} 不存在或为空，"
+                      f"请确认任务 {task_id} 已完成过 ASR 阶段。")
+                sys.exit(1)
+        except Exception as e:
+            _log(f"[错误] 无法访问服务端 segments 目录: {e}")
             sys.exit(1)
-    except Exception as e:
-        _log(f"[错误] 无法访问服务端 segments 目录: {e}")
-        sys.exit(1)
 
     # 检查服务端无正在运行的任务
     try:
@@ -1121,6 +1244,7 @@ def preprocess_edit_rerun(
     target_codes = normalize_target_language_codes(target_languages) if target_languages else []
 
     # 执行编辑检测和变更
-    _detect_and_apply_edits(client, task_id, input_paths, target_codes, compute_dest_dir)
+    has_changes = _detect_and_apply_edits(client, task_id, input_paths, target_codes, compute_dest_dir)
 
     _log("--- 编辑重跑预处理完成 ---")
+    return has_changes

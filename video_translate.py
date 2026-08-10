@@ -141,6 +141,7 @@ def process_video_pipeline(
     new_task: bool = False,
     keep_server_files: bool = False,
     task_id_dir: Path | None = None,
+    asr_reselect: bool = False,
 ):
     """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
 
@@ -172,6 +173,8 @@ def process_video_pipeline(
     # - 开启 enable_visual_diarization 则直接上传 mp4，让服务端在 diarization 阶段使用视觉信息
     _log("--- Step 1: 准备上传素材 ---")
     video_data: dict[Path, dict] = {}
+    # 记录被跳过的视频（已存在翻译结果），批量模式下仍需同步其 segments
+    skipped_videos: list[Path] = []
 
     # 批量模式 + 新任务：统一删除 task_id_dir 下的 .vt_task_id 文件
     if new_task and task_id_dir is not None:
@@ -188,16 +191,8 @@ def process_video_pipeline(
             print(f"文件不存在: {video_path}，跳过")
             continue
 
-        # 编辑重跑模式：删除已翻译的目标语言视频，避免被跳过检查跳过
-        if edit_rerun:
-            for code in target_codes:
-                out_video = build_translated_output_path(video_path, video_path, code)
-                if out_video.exists():
-                    try:
-                        out_video.unlink()
-                        print(f"[编辑重跑] 删除已翻译视频: {out_video.name}")
-                    except OSError as e:
-                        print(f"[警告] 无法删除 {out_video.name}: {e}")
+        # 编辑重跑模式：不再在此处删除已翻译视频，改为 Step 2 检测到变更后再删除
+        # （避免未检测到变更时白白删除视频）
 
         # 新任务模式：删除所有本地中间结果和输出，强制从头开始
         if new_task:
@@ -231,12 +226,13 @@ def process_video_pipeline(
                     except OSError as e:
                         print(f"[警告] 无法删除 {task_id_file.name}: {e}")
 
-        # 检查是否所有目标语言的视频都已存在
-        if all(
+        # 检查是否所有目标语言的视频都已存在（编辑重跑模式跳过此检查，需先检测变更）
+        if not edit_rerun and all(
             build_translated_output_path(video_path, video_path, code).exists()
             for code in target_codes
         ):
             print(f"所有目标视频已存在，跳过: {video_path}")
+            skipped_videos.append(video_path)
             continue
 
         if enable_visual_diarization:
@@ -326,6 +322,9 @@ def process_video_pipeline(
         if stop_after_translation:
             audio_argv.append("--stop-after-translation")
 
+        if asr_reselect:
+            audio_argv.append("--asr-reselect")
+
         if new_task:
             audio_argv.append("--new-task")
 
@@ -354,12 +353,44 @@ def process_video_pipeline(
         finally:
             sys.argv = original_argv
 
+        # 编辑重跑模式：仅在检测到变更时删除已翻译视频，触发 Step 3 重新合成
+        if edit_rerun:
+            import audio_translate as _at_module
+            if _at_module.edit_rerun_had_changes:
+                for video_path in video_data:
+                    for code in target_codes:
+                        out_video = build_translated_output_path(video_path, video_path, code)
+                        if out_video.exists():
+                            try:
+                                out_video.unlink()
+                                print(f"[编辑重跑] 检测到变更，删除已翻译视频: {out_video.name}")
+                            except OSError as e:
+                                print(f"[警告] 无法删除 {out_video.name}: {e}")
+            else:
+                _log("编辑重跑未检测到变更，保留已翻译视频")
+
     _log(f"Step 2 完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
 
     # ── Step 3: 合并音轨（视频画面保持原速，不做任何切分/调速）──────────
     # stop_after_translation 模式下没有 final.mp3，跳过音轨合并
     if stop_after_translation:
         _log("--- Step 3: 跳过音轨合并（stop-after-translation 模式）---")
+        # 批量模式下，跳过的视频仍需同步 segments（服务端 -> 客户端），
+        # 确保后续编辑重跑时本地文件完整
+        if skipped_videos:
+            _log("同步跳过的视频 segments...")
+            try:
+                from remote_client import RemoteScriptClient
+                from audio_translate import _sync_files, _compute_dest_dir, _load_task_id
+                sync_client = RemoteScriptClient(server_url)
+                for video_path in skipped_videos:
+                    task_id = _load_task_id(video_path, task_id_dir=task_id_dir)
+                    if task_id:
+                        dest_dir = _compute_dest_dir(video_path)
+                        _sync_files(sync_client, task_id, video_path.parent,
+                                   sub_dir=dest_dir, since=0)
+            except Exception as e:
+                print(f"  [警告] 跳过视频同步失败: {e}")
         _log("翻译文本和 SRT 字幕已生成，无需 TTS 和音轨合并。")
         # 流水线未跑完（中间状态），不归档、不删除服务端文件，以便后续继续运行
         _log("[stop-after-translation] 流水线未完成，保留服务端任务文件以便后续继续运行。")
@@ -371,12 +402,16 @@ def process_video_pipeline(
 
     # 合成前同步检查：确保本地文件与服务端一致（所有模式统一执行）
     # 防止服务端重新生成的文件（如 combined.mp3/final.mp3）未被下载到本地
+    # 批量模式下，跳过的视频也需要同步（服务端 -> 客户端），
+    # 否则后续编辑重跑时本地 segments 不完整会导致误判
     _log("合成前文件同步检查...")
     try:
         from remote_client import RemoteScriptClient
         from audio_translate import _sync_files, _compute_dest_dir, _load_task_id
         sync_client = RemoteScriptClient(server_url)
-        for video_path in video_data:
+        # 同步所有视频（包括跳过的），确保本地 segments 与服务端一致
+        all_videos = list(video_data.keys()) + skipped_videos
+        for video_path in all_videos:
             task_id = _load_task_id(video_path, task_id_dir=task_id_dir)
             if task_id:
                 dest_dir = _compute_dest_dir(video_path)
@@ -428,8 +463,7 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-# 'gemini-3.5-flash'
-DEFAULT_MODELS = ['doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'doubao-seed-2-1-pro', 'gemini-3.5-flash']
+DEFAULT_MODELS = ['doubao-seed-2-1-turbo', 'deepseek-v4-flash', 'doubao-seed-2-1-pro', 'gemini-3.5-flash']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")
@@ -465,6 +499,11 @@ def main():
                    help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+                   help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
+                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
+                        'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
+                        '传 --asr-reselect 启用二次验证。')
 
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
@@ -549,6 +588,7 @@ def main():
             stop_after_translation=args.stop_after_translation,
             new_task=args.new_task,
             keep_server_files=args.keep_server_files,
+            asr_reselect=args.asr_reselect,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

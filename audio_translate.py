@@ -423,6 +423,10 @@ def _build_remote_args(args) -> list[str]:
     # TTS 时长感知翻译：最小合格候选数量（服务端会限制 1~10）
     remote_args.extend(['--tts-aware-min-candidate-count', str(args.tts_aware_min_candidate_count)])
 
+    # ASR 候选重选（默认关闭，仅在显式开启时透传）
+    if getattr(args, 'asr_reselect', False):
+        remote_args.append('--asr-reselect')
+
     # 视觉辅助说话人切分（默认关闭，仅在显式开启时透传）
     if getattr(args, 'enable_visual_diarization', False):
         remote_args.append('--enable-visual-diarization')
@@ -672,6 +676,27 @@ def _parse_error_code(stdout_lines: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _parse_warning_codes(stdout_lines: list[str]) -> list[str]:
+    """从 stdout 行中解析服务端输出的所有质量警告。
+
+    服务端输出格式：>>> WARN: {code} | {message}
+
+    返回所有警告行列表（去重保序），未找到则返回空列表。
+    """
+    seen = set()
+    warnings = []
+    for line in stdout_lines:
+        line = line.strip()
+        if line.startswith('>>> WARN:'):
+            if line not in seen:
+                seen.add(line)
+                warnings.append(line)
+    return warnings
+
+
+# 编辑重跑是否检测到变更（供 video_translate.py 决定是否删除已翻译视频）
+edit_rerun_had_changes: bool = False
+
 # ─── 主流程 ────────────────────────────────────────────────
 
 def main():
@@ -704,6 +729,11 @@ def main():
                    help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+                   help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
+                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
+                        'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
+                        '传 --asr-reselect 启用二次验证。')
     p.add_argument('--stop-after-translation', action='store_true',
                    help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
@@ -969,8 +999,12 @@ def main():
         _log("服务端文件校验通过。")
 
     # ── 2b. 编辑重跑预处理 ─────────────────────────────────
+    # 注意：编辑重跑模式下，客户端是标准（客户端 -> 服务端），不能预同步。
+    # 如果预同步，用户故意删除的文件会被服务端补回来，导致编辑重跑失效。
+    # 安全机制由 edit_rerun.py 中的大批量删除安全检查（50% 阈值确认）保障。
     if args.edit_rerun:
-        preprocess_edit_rerun(
+        global edit_rerun_had_changes
+        edit_rerun_had_changes = preprocess_edit_rerun(
             client=client,
             task_id=task_id,
             input_paths=input_paths,
@@ -1094,6 +1128,16 @@ def main():
         sys.exit(130)
     except RuntimeError as e:
         _log_stage_summary()
+        # 安全网：最后一次轮询可能遗漏最后的 stdout（如 >>> ERROR 行），
+        # 再拉取一次确保获取完整输出用于错误代码解析
+        try:
+            final_info = client.status(task_id, since_line=last_line)
+            final_stdout = final_info.get("stdout", "")
+            if final_stdout:
+                print(final_stdout, end='', flush=True)
+                last_stdout_lines.extend(final_stdout.splitlines())
+        except Exception:
+            pass
         # 尝试从已捕获的 stdout 中解析服务端输出的错误代码
         error_code, error_msg = _parse_error_code(last_stdout_lines)
         if error_code:
@@ -1128,6 +1172,14 @@ def main():
 
     _log(f"远程执行完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
     _log_stage_summary()
+
+    # 检查并显示质量警告
+    warnings = _parse_warning_codes(last_stdout_lines)
+    if warnings:
+        _log(f"[警告] 共 {len(warnings)} 条质量警告（详见错误代码说明.md）：")
+        for w in warnings:
+            print(f"  {w}")
+
     step_start = time.perf_counter()
 
     # ── 5. 最终全量同步（带验证和重试） ─────────────────────

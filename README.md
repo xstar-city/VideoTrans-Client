@@ -120,6 +120,22 @@ python batch_video_translate.py "E:\短剧\《逐玉》" -t en --server <ServerI
 
 服务端利用 **Seed-TTS-eval** 类似方法进行音色评估，并自动选择音色相似度更优的候选。所有合格候选音频也会开放给客户端下载，人工听感更好的候选可以手动替换正式片段音频；当前自动选优主要依据音色相似度，尚未对候选文本正确性做 ASR 校验，后续可增加 ASR 校验进一步筛选。
 
+### ASR 候选重选（`--asr-reselect`）
+
+TTS 时长感知翻译在试合成时会用 TTS 内置小模型返回 `asr_clarity`（清晰度评分），用于正常选优。对于选优精度有更高要求的场景，可启用 `--asr-reselect` 进行二次验证：
+
+1. **批量 ASR 识别**：所有段翻译完成后，用更大的 ASR 模型（与 ASR 阶段相同的引擎）批量识别每个候选音频
+2. **文本相似度评估**：将 ASR 识别结果与 TTS 目标文本对比，计算相似度（difflib 序列匹配）
+3. **综合评分重选**：按 `0.5 * 文本相似度 + 0.3 * 音色相似度 + 0.2 * (清晰度/100)` 加权评分重新选优
+4. **断点续跑**：每段目录写 `.asr_reselect_done` 标记，重跑时跳过已完成的段
+
+```bash
+# 启用 ASR 候选重选
+python video_translate.py "1.mp4" -t en --server <ServerIP> --asr-reselect
+```
+
+> ⚠️ 启用后会增加 ASR 批量识别耗时（需加载 ASR 模型），建议仅在翻译质量要求高的场景使用。音色替换（`video_voice_replace.py`）同样支持此参数。
+
 ## SRT 字幕文件
 
 整个流程中共有三类 SRT 字幕文件，来源和用途各不相同：
@@ -314,6 +330,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--tts-max-audio-slowdown-pct` | TTS 合成音频最大减速百分比（合成短于参考时 librosa 拉伸放慢的上限） | 0.2 |
 | `--tts-max-audio-speedup-pct` | TTS 合成音频最大加速百分比（合成长于参考时 librosa 拉伸加快的上限） | 0.2 |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量（1-10，服务端自动限制范围） | 3 |
+| `--asr-reselect` | 翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别所有候选音频，按"文本相似度(50%)+音色相似度(30%)+清晰度(20%)"综合评分重新选优。默认关闭（TTS 内置 ASR 已在试合成时返回清晰度并用于正常选优）；传 `--asr-reselect` 启用二次验证，适用于对选优精度有更高要求的场景。 | 关闭 |
 | `--stop-after-translation` | 翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。翻译完成后始终生成 `full_translation.srt` 字幕文件（无论是否启用此参数）。核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。 | 关闭 |
 
 #### 翻译模型列表（`--translation-models`）

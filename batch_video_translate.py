@@ -50,6 +50,7 @@ from Common.config import (
 from Common.language_map import normalize_target_language_codes
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from Common.video_utils import get_video_duration
+from video_translate import DEFAULT_MODELS
 from remote_client import resolve_server_arg
 
 
@@ -60,14 +61,6 @@ from remote_client import resolve_server_arg
 # 排除流水线派生文件（如 _translated_en.mp4、_vocals.wav、_upload_480p.mp4 等）
 # 统一引用 Common 中的 PIPELINE_DERIVED_STEM_MARKERS，新增派生类型时只需在 Common 中添加
 _IGNORED_STEM_MARKERS = PIPELINE_DERIVED_STEM_MARKERS
-
-# video pipeline 默认翻译模型（与 video_translate.py 保持一致）
-DEFAULT_MODELS = [
-    'doubao-seed-2-1-turbo',
-    'deepseek-v4-pro',
-    'doubao-seed-2-1-pro',
-    'gemini-3.5-flash',
-]
 
 
 # ============================================================
@@ -326,6 +319,11 @@ def main():
                    help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+                   help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
+                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
+                        'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
+                        '传 --asr-reselect 启用二次验证。')
 
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
@@ -345,6 +343,10 @@ def main():
                    help='强制从头重新翻译：删除本地已翻译视频、segments 目录和 .vt_task_id 文件，'
                         '在服务端创建全新任务。用于需要完全重跑的场景。'
                         '批量模式下删除的是根目录下的统一 .vt_task_id 文件。')
+    p.add_argument('--keep-server-files', '-k', action='store_true',
+                   help='调试用：跑完后不归档、不删除服务端任务目录，方便检查中间产物。'
+                        '注意：audio_translate 已通过 --no-archive 禁止自动归档，'
+                        '本参数额外跳过 video_translate 最终的归档步骤。')
 
     args = p.parse_args()
 
@@ -427,7 +429,9 @@ def main():
             edit_rerun=args.edit_rerun,
             stop_after_translation=args.stop_after_translation,
             new_task=args.new_task,
+            keep_server_files=args.keep_server_files,
             task_id_dir=root_dir,
+            asr_reselect=args.asr_reselect,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，批量视频翻译流程已中断。")
