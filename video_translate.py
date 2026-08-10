@@ -499,6 +499,7 @@ def main():
                    help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
+                   
     p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
                    help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
                         '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
