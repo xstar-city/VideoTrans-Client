@@ -2,7 +2,7 @@
 
 # VideoTrans 客户端
 
-**一行命令，将视频翻译成 80+ 种语言。**
+**一行命令，将视频翻译成 600+ 种语言。**
 
 ```bash
 python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server <ServerIP>
@@ -15,7 +15,7 @@ python video_translate.py 视频1.mp4 视频2.mp4 -t en hi --server <ServerIP>
 | 🎬 多个视频 | 同时指定多个视频文件，服务端批量处理 | `"1.mp4" "2.mp4"` |
 | 🌍 多个语种 | 一次生成多种语言版本 | `-t en hi ja` |
 
-> 📌 **输入**支持中文、英语及多种中国方言（[完整列表](#3-支持的语种)）　|　**输出**支持 **80+** 种语言（[完整列表](#3-支持的语种)）
+> 📌 **输入**支持中文、英语及多种中国方言（[完整列表](#3-支持的语种)）　|　**输出**支持 **600+** 种语言（[完整列表](#3-支持的语种)）
 
 ---
 
@@ -275,7 +275,7 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 
 > `zh-cn`、`zh-tw` 为 `zh` 的别名。完整列表见 [asr_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/asr_languages.py)
 
-**输出语种（目标语言）**：支持 80+ 种语言
+**输出语种（目标语言）**：支持 600+ 种语言
 
 | 代码 | 语言 | | 代码 | 语言 |
 |------|------|-|------|------|
@@ -286,6 +286,13 @@ VideoTrans 采用 **客户端-服务端** 分离架构：
 | `pt` | Portuguese | | `ru` | Russian |
 | `it` | Italian | | `th` | Thai |
 | `vi` | Vietnamese | | `id` | Indonesian |
+| `pl` | Polish | | `nl` | Dutch |
+| `tr` | Turkish | | `el` | Greek |
+| `sv` | Swedish | | `he` | Hebrew |
+| `cs` | Czech | | `ro` | Romanian |
+| `hu` | Hungarian | | `fi` | Finnish |
+| `uk` | Ukrainian | | `ms` | Malay |
+| `bn` | Bengali | | `ta` | Tamil |
 
 > 完整列表见 [tts_languages.py](https://github.com/xstar-city/VideoTrans-Common/blob/main/src/Common/tts_languages.py)
 
