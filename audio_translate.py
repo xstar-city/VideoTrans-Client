@@ -490,13 +490,16 @@ def _compute_file_hash(path: Path, chunk_size: int = 65536) -> str:
 
 def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 sub_dir: str = "", since: float = 0,
-                cleanup_stale: bool = False) -> float:
+                cleanup_stale: bool = False,
+                with_hash: bool = True) -> float:
     """从服务端增量下载文件到本地目录，返回最新的 mtime。
 
     cleanup_stale=True 时，同步完成后删除本地过时文件
     （服务端已不存在的 .mp3/.txt/.srt，如 VAD 裁剪改名后的旧文件）。
+    with_hash=False 时跳过服务端 hash 计算，仅用 size+mtime 判断是否需要下载，
+    适用于运行时周期同步等不需要精确内容比对的场景。
     """
-    result = client.list_files(task_id, sub_dir=sub_dir, since=since, with_hash=True)
+    result = client.list_files(task_id, sub_dir=sub_dir, since=since, with_hash=with_hash)
     latest_mtime = since
 
     # 记录服务端可见条目名，用于清理本地孤儿文件
@@ -518,6 +521,7 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 sub_dir=f"{sub_dir}/{name}" if sub_dir else name,
                 since=since,
                 cleanup_stale=cleanup_stale,
+                with_hash=with_hash,
             )
             if sub_latest > latest_mtime:
                 latest_mtime = sub_latest
@@ -527,6 +531,7 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
             # mtime 检查：服务端重新生成文件后（如 edit-rerun 触发 TTS 重合成），
             # 即使 size 不变也能检测到并重新下载。但 mtime 受客户端/服务端时间差影响，
             # 可能误判 -> hash 兜底：size 相同且 hash 相同则跳过，无论 mtime 如何。
+            # with_hash=False 时跳过 hash，仅用 size+mtime：mtime 更新即重新下载。
             local_file = local_dir / name
             remote_path = f"{sub_dir}/{name}" if sub_dir else name
             remote_size = item.get("size", -1)
@@ -536,16 +541,20 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
                 try:
                     local_stat = local_file.stat()
                     if local_stat.st_size == remote_size:
-                        # size 匹配，检查 mtime
-                        if remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
-                            # mtime 提示服务端文件更新，但可能是时间波动 -> hash 兜底
-                            if remote_hash:
-                                local_hash = _compute_file_hash(local_file)
-                                if local_hash == remote_hash:
-                                    continue  # hash 相同，内容未变，跳过
-                            print(f"  [更新] {remote_path} (服务端文件已更新，重新下载)")
+                        if with_hash:
+                            # size 匹配，检查 mtime
+                            if remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
+                                # mtime 提示服务端文件更新，但可能是时间波动 -> hash 兜底
+                                if remote_hash:
+                                    local_hash = _compute_file_hash(local_file)
+                                    if local_hash == remote_hash:
+                                        continue  # hash 相同，内容未变，跳过
+                                print(f"  [更新] {remote_path} (服务端文件已更新，重新下载)")
+                            else:
+                                continue  # size 和 mtime 都匹配，跳过
                         else:
-                            continue  # size 和 mtime 都匹配，跳过
+                            # 无 hash 模式：仅用 size 判断，mtime 不可靠（时间差）故不参与
+                            continue
                 except OSError:
                     pass
             try:
@@ -565,14 +574,15 @@ def _sync_files(client: RemoteScriptClient, task_id: str, local_dir: Path,
 
 
 def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
-                 sub_dir: str = "") -> list[str]:
+                 sub_dir: str = "", with_hash: bool = True) -> list[str]:
     """验证本地文件与服务端一致，返回缺失或大小不匹配的文件路径列表。
 
     与 _sync_files 不同，此函数只检查不下载，用于最终确认所有文件已同步完成。
+    with_hash=False 时仅用 size 检查，不做 mtime/hash 校验。
     """
     missing = []
     try:
-        result = client.list_files(task_id, sub_dir=sub_dir, since=0, with_hash=True)
+        result = client.list_files(task_id, sub_dir=sub_dir, since=0, with_hash=with_hash)
     except Exception:
         # 无法连接服务端时，无法验证，返回空列表
         return missing
@@ -585,6 +595,7 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
             sub_missing = _verify_sync(
                 client, task_id, local_sub,
                 sub_dir=f"{sub_dir}/{name}" if sub_dir else name,
+                with_hash=with_hash,
             )
             missing.extend(sub_missing)
         else:
@@ -600,7 +611,7 @@ def _verify_sync(client: RemoteScriptClient, task_id: str, local_dir: Path,
                     local_stat = local_file.stat()
                     if local_stat.st_size != remote_size:
                         missing.append(f"{remote_path} (大小不匹配: 本地{local_stat.st_size} vs 服务端{remote_size})")
-                    elif remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
+                    elif with_hash and remote_mtime > 0 and remote_mtime > local_stat.st_mtime:
                         # size 匹配但 mtime 不同，可能是时间波动 -> hash 兜底
                         if remote_hash:
                             local_hash = _compute_file_hash(local_file)
@@ -694,8 +705,8 @@ def _parse_warning_codes(stdout_lines: list[str]) -> list[str]:
     return warnings
 
 
-# 编辑重跑是否检测到变更（供 video_translate.py 决定是否删除已翻译视频）
-edit_rerun_had_changes: bool = False
+# 编辑重跑检测到变更的 dest_dir 集合（供 video_translate.py 决定删除哪些已翻译视频）
+edit_rerun_had_changes: set[str] = set()
 
 # ─── 主流程 ────────────────────────────────────────────────
 
@@ -888,14 +899,23 @@ def main():
 
     for input_path in args.inputs:
         path = Path(input_path)
-        if not path.exists():
-            _log(f"文件不存在: {path}")
-            sys.exit(1)
-
         dest_dir = _compute_dest_dir(path)
         # 若提供了 --upload-as 映射，用映射的服务端文件名（保持 stem 一致）
         server_name = upload_as_map.get(str(path), path.name)
         dest_path = f"{dest_dir}/{server_name}"
+
+        if args.edit_rerun:
+            # 编辑重跑模式：跳过音视频文件上传，仅验证服务端文件存在
+            if dest_path not in existing_remote_files:
+                _log(f"[错误] 编辑重跑模式：服务端缺少文件 {dest_path}，"
+                     f"请先完成首次翻译后再使用 --edit-rerun。")
+                sys.exit(1)
+            skip_count += 1
+            continue
+
+        if not path.exists():
+            _log(f"文件不存在: {path}")
+            sys.exit(1)
 
         local_size = path.stat().st_size
         remote_size = existing_remote_files.get(dest_path)
@@ -911,6 +931,9 @@ def main():
         upload_count += 1
         upload_bytes += local_size
         _check_upload_progress()
+
+    if args.edit_rerun:
+        _log(f"编辑重跑模式：跳过 {len(args.inputs)} 个音视频文件上传（服务端文件已存在）")
 
     # 持久化 task_id（保存到所有输入文件所在目录，或批量模式的统一目录）
     _save_task_id_all(input_paths, task_id, task_id_dir=task_id_dir)
@@ -1002,6 +1025,12 @@ def main():
     # 注意：编辑重跑模式下，客户端是标准（客户端 -> 服务端），不能预同步。
     # 如果预同步，用户故意删除的文件会被服务端补回来，导致编辑重跑失效。
     # 安全机制由 edit_rerun.py 中的大批量删除安全检查（50% 阈值确认）保障。
+    # 为每个输入文件计算本地目录和对应的子目录名
+    input_sync_info = []
+    for input_path in args.inputs:
+        p = Path(input_path)
+        input_sync_info.append((p.parent, _compute_dest_dir(p)))
+
     if args.edit_rerun:
         global edit_rerun_had_changes
         edit_rerun_had_changes = preprocess_edit_rerun(
@@ -1011,6 +1040,17 @@ def main():
             target_languages=args.targets,
             compute_dest_dir=_compute_dest_dir,
         )
+
+    # 编辑重跑模式：仅同步有变更的输入目录，跳过未变更的
+    # （服务端不会修改未变更输入的文件，无需在周期同步和最终同步中重复扫描）
+    if args.edit_rerun:
+        sync_info_final = [(local_dir, dest_dir) for local_dir, dest_dir in input_sync_info
+                           if dest_dir in edit_rerun_had_changes]
+        skipped_count = len(input_sync_info) - len(sync_info_final)
+        if skipped_count > 0:
+            _log(f"编辑重跑模式：跳过 {skipped_count} 个未变更输入的同步检查")
+    else:
+        sync_info_final = input_sync_info
 
     _log(f"校验 + 预处理完成，耗时 {_format_duration(time.perf_counter() - step_start)}")
     step_start = time.perf_counter()
@@ -1047,12 +1087,6 @@ def main():
     last_sync_check = 0.0  # 同步频率控制：wall clock
     last_line = 0
     last_stdout_lines: list[str] = []  # 捕获 stdout 行，用于错误代码解析
-
-    # 为每个输入文件计算本地目录和对应的子目录名
-    input_sync_info = []
-    for input_path in args.inputs:
-        p = Path(input_path)
-        input_sync_info.append((p.parent, _compute_dest_dir(p)))
 
     # 流水线阶段计时跟踪
     _stage_state = {'name': None, 'start': None, 'timings': []}
@@ -1099,13 +1133,15 @@ def main():
         last_line = status_info.get("total_lines", last_line)
 
         # 每 3 秒全量扫描下载：确保之前下载失败的文件被重试
+        # 运行时不需要 hash 精度，跳过服务端 hash 计算以减少开销
         now = time.time()
         if now - last_sync_check >= 3.0:
             try:
-                for local_dir, dest_dir in input_sync_info:
+                for local_dir, dest_dir in sync_info_final:
                     _sync_files(
                         client, task_id, local_dir,
-                        sub_dir=dest_dir, since=0
+                        sub_dir=dest_dir, since=0,
+                        with_hash=False,
                     )
             except Exception:
                 pass
@@ -1187,13 +1223,14 @@ def main():
     all_missing = []
     for round_num in range(1, MAX_SYNC_ROUNDS + 1):
         # 全量扫描下载（首轮启用孤儿文件清理：删除服务端已改名/删除但本地仍残留的文件）
-        for local_dir, dest_dir in input_sync_info:
+        # 最终同步需要 hash 精度：combined.mp3/final.mp3 等文件重新合成后 size 可能不变但内容已变
+        for local_dir, dest_dir in sync_info_final:
             _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0,
                         cleanup_stale=(round_num == 1))
 
-        # 验证：检查服务端所有可见文件是否已同步到本地
+        # 验证：检查服务端所有可见文件是否已同步到本地（使用 hash 精确校验）
         all_missing = []
-        for local_dir, dest_dir in input_sync_info:
+        for local_dir, dest_dir in sync_info_final:
             missing = _verify_sync(client, task_id, local_dir, sub_dir=dest_dir)
             all_missing.extend(missing)
 
@@ -1219,13 +1256,13 @@ def main():
     # 然后验证本地与服务端文件一一对应。
     # _verify_sync 已确保"服务端有的文件本地也有"，
     # 此步骤先删除"本地有但服务端没有"的残留文件，再做最终确认。
-    for local_dir, dest_dir in input_sync_info:
+    for local_dir, dest_dir in sync_info_final:
         _sync_files(client, task_id, local_dir, sub_dir=dest_dir, since=0,
-                    cleanup_stale=True)
+                    cleanup_stale=True, with_hash=False)
 
     # 验证：清理后确认本地与服务端文件一一对应
     extra_local = []
-    for local_dir, dest_dir in input_sync_info:
+    for local_dir, dest_dir in sync_info_final:
         extras = _find_local_only_files(client, task_id, local_dir, sub_dir=dest_dir)
         extra_local.extend(extras)
 

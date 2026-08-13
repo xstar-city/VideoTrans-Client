@@ -235,6 +235,12 @@ def process_video_pipeline(
             skipped_videos.append(video_path)
             continue
 
+        if edit_rerun:
+            # 编辑重跑模式：跳过音频提取/视频压缩，服务端文件已存在
+            mp3_path = video_path.with_suffix(".mp3")
+            video_data[video_path] = {"upload": mp3_path}
+            continue
+
         if enable_visual_diarization:
             # 压缩视频后上传（短边 480p / 25fps / CRF 30），节省上传带宽
             # 最终合成视频仍使用本地高清原版（Step 3 中 mux 使用 video_path）
@@ -353,11 +359,16 @@ def process_video_pipeline(
         finally:
             sys.argv = original_argv
 
-        # 编辑重跑模式：仅在检测到变更时删除已翻译视频，触发 Step 3 重新合成
+        # 编辑重跑模式：仅在检测到变更时删除对应视频的已翻译输出，触发 Step 3 重新合成
         if edit_rerun:
             import audio_translate as _at_module
-            if _at_module.edit_rerun_had_changes:
+            changed_dirs = _at_module.edit_rerun_had_changes
+            if changed_dirs:
                 for video_path in video_data:
+                    # dest_dir 与 audio_translate._compute_dest_dir 一致：父目录名
+                    dest_dir = video_path.resolve().parent.name
+                    if dest_dir not in changed_dirs:
+                        continue
                     for code in target_codes:
                         out_video = build_translated_output_path(video_path, video_path, code)
                         if out_video.exists():
@@ -463,7 +474,7 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'doubao-seed-2-1-pro', 'deepseek-v4-flash', 'gemini-3.5-flash']
+DEFAULT_MODELS = ['gpt-5.6-luna', 'doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'deepseek-v4-flash', 'gpt-5.6-terra', 'gemini-3.5-flash']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")

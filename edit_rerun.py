@@ -1177,10 +1177,17 @@ def _detect_and_apply_edits(
             except Exception as e:
                 print(f"  [警告] 返修日志记录失败: {e}")
 
-    has_changes = bool(upload_list or delete_files or delete_dirs)
-    if not has_changes:
+    # 计算实际发生变更的 dest_dir 集合（基于已执行的上传和删除操作）
+    changed_dest_dirs: set[str] = set()
+    for _, remote_path in upload_list:
+        changed_dest_dirs.add(remote_path.split('/', 1)[0])
+    for f in delete_files:
+        changed_dest_dirs.add(f.split('/', 1)[0])
+    for d in delete_dirs:
+        changed_dest_dirs.add(d.split('/', 1)[0])
+    if not changed_dest_dirs:
         _log("未检测到任何编辑变更，服务端文件已是最新。")
-    return has_changes
+    return changed_dest_dirs
 
 
 def preprocess_edit_rerun(
@@ -1243,8 +1250,8 @@ def preprocess_edit_rerun(
     # 解析目标语言
     target_codes = normalize_target_language_codes(target_languages) if target_languages else []
 
-    # 执行编辑检测和变更
-    has_changes = _detect_and_apply_edits(client, task_id, input_paths, target_codes, compute_dest_dir)
+    # 执行编辑检测和变更，返回有变更的 dest_dir 集合
+    changed_dest_dirs = _detect_and_apply_edits(client, task_id, input_paths, target_codes, compute_dest_dir)
 
     _log("--- 编辑重跑预处理完成 ---")
-    return has_changes
+    return changed_dest_dirs

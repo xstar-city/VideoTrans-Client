@@ -355,12 +355,12 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 ```python
 # 对外客户端/video_translate.py
-DEFAULT_MODELS = ['gemini-3.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'deepseek-v4-pro', 'doubao-seed-2-0-pro']
+DEFAULT_MODELS = ['gpt-5.6-luna', 'doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'deepseek-v4-flash', 'gpt-5.6-terra', 'gemini-3.5-flash']
 ```
 
 翻译时会**按顺序依次尝试**列表中的模型，因此：
 
-- **模型可以重复**：例如上例中 `gemini-3.5-flash` 出现两次，表示首次失败后自动重试一次。
+- **模型可以重复**：例如列表中可以让同一模型出现多次，表示首次失败后自动重试一次。
 - **顺序兜底保证鲁棒性**：如果某个模型服务出错或不可访问，会自动跳到列表中的下一个模型继续翻译，不会因为单个模型故障导致整个流程中断。
 - **自定义方式**：既可以在命令行通过 `--translation-models modelA,modelB` 临时指定，也可以直接修改 `DEFAULT_MODELS` 变量调整默认值。
 
