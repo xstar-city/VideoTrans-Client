@@ -355,7 +355,7 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 ```python
 # 对外客户端/video_translate.py
-DEFAULT_MODELS = ['gpt-5.6-luna', 'doubao-seed-2-1-turbo', 'deepseek-v4-pro', 'deepseek-v4-flash', 'gpt-5.6-terra', 'gemini-3.5-flash']
+DEFAULT_MODELS = ['gpt-5.6-luna', 'gemini-3.5-flash-lite', 'deepseek-v4-pro', 'deepseek-v4-flash', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
 ```
 
 翻译时会**按顺序依次尝试**列表中的模型，因此：
