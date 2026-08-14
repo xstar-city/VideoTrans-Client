@@ -25,6 +25,7 @@ from pathlib import Path
 
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
+from Common.config import FINAL_AUDIO_LUFS
 from remote_client import resolve_server_arg
 from video_translate import DEFAULT_MODELS, process_video_pipeline
 
@@ -54,6 +55,11 @@ def main():
                                    "与 --server 互斥。")
     # ── 可覆盖的预置参数 ──
     p.add_argument("--denoise", choices=["none", "normal", "aggressive"], default="aggressive", help="音频降噪类型，默认：aggressive")
+    p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
+                   help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
+                        f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
+                        f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
+                        f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
     p.add_argument("--translation-models", default=",".join(DEFAULT_MODELS), help="翻译模型列表，以逗号分隔。默认使用与完整版相同的模型列表。")
     p.add_argument("--extra-translation-guideline", default=None, help="额外翻译指南文本文件路径")
     # ── 工作流参数 ──
@@ -122,6 +128,7 @@ def main():
             new_task=args.new_task,
             edit_rerun=args.edit_rerun,
             keep_server_files=args.keep_server_files,
+            final_lufs=args.final_lufs,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

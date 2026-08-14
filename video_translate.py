@@ -33,6 +33,7 @@ from pathlib import Path
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.config import (
     FINAL_AUDIO_FILENAME,
+    FINAL_AUDIO_LUFS,
     TTS_MAX_AUDIO_SLOWDOWN_PCT,
     TTS_MAX_AUDIO_SPEEDUP_PCT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
@@ -142,6 +143,7 @@ def process_video_pipeline(
     keep_server_files: bool = False,
     task_id_dir: Path | None = None,
     asr_reselect: bool = False,
+    final_lufs: float = FINAL_AUDIO_LUFS,
 ):
     """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
 
@@ -307,6 +309,8 @@ def process_video_pipeline(
         audio_argv.extend(["--tts-max-audio-slowdown-pct", str(tts_max_audio_slowdown_pct)])
         audio_argv.extend(["--tts-max-audio-speedup-pct", str(tts_max_audio_speedup_pct)])
         audio_argv.extend(["--tts-aware-min-candidate-count", str(tts_aware_min_candidate_count)])
+        # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
+        audio_argv.extend(["--final-lufs", str(final_lufs)])
         if extra_translation_guideline:
             audio_argv.extend(["--extra-translation-guideline", extra_translation_guideline])
 
@@ -516,6 +520,11 @@ def main():
                         '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
                         'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
                         '传 --asr-reselect 启用二次验证。')
+    p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
+                   help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
+                        f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
+                        f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
+                        f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
 
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
@@ -601,6 +610,7 @@ def main():
             new_task=args.new_task,
             keep_server_files=args.keep_server_files,
             asr_reselect=args.asr_reselect,
+            final_lufs=args.final_lufs,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，视频翻译流程已中断。")

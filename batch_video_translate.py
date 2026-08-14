@@ -46,6 +46,7 @@ from Common.config import (
     TTS_MAX_AUDIO_SPEEDUP_PCT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
+    FINAL_AUDIO_LUFS,
 )
 from Common.language_map import normalize_target_language_codes
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
@@ -324,6 +325,11 @@ def main():
                         '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
                         'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
                         '传 --asr-reselect 启用二次验证。')
+    p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
+                   help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
+                        f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
+                        f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
+                        f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
 
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
@@ -432,6 +438,7 @@ def main():
             keep_server_files=args.keep_server_files,
             task_id_dir=root_dir,
             asr_reselect=args.asr_reselect,
+            final_lufs=args.final_lufs,
         )
     except KeyboardInterrupt:
         print("\n\n用户取消，批量视频翻译流程已中断。")

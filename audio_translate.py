@@ -38,6 +38,8 @@ from Common.config import (
     TTS_MAX_AUDIO_SPEEDUP_PCT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
+    FINAL_AUDIO_LUFS,
+    CLIENT_VISIBLE_LOG_PREFIX,
 )
 
 
@@ -423,6 +425,9 @@ def _build_remote_args(args) -> list[str]:
     # TTS 时长感知翻译：最小合格候选数量（服务端会限制 1~10）
     remote_args.extend(['--tts-aware-min-candidate-count', str(args.tts_aware_min_candidate_count)])
 
+    # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
+    remote_args.extend(['--final-lufs', str(args.final_lufs)])
+
     # ASR 候选重选（默认关闭，仅在显式开启时透传）
     if getattr(args, 'asr_reselect', False):
         remote_args.append('--asr-reselect')
@@ -678,8 +683,8 @@ def _parse_error_code(stdout_lines: list[str]) -> tuple[str | None, str | None]:
     """
     for line in reversed(stdout_lines):
         line = line.strip()
-        if line.startswith('>>> ERROR:'):
-            rest = line[len('>>> ERROR:'):].strip()
+        if line.startswith(f'{CLIENT_VISIBLE_LOG_PREFIX} ERROR:'):
+            rest = line[len(f'{CLIENT_VISIBLE_LOG_PREFIX} ERROR:'):].strip()
             if '|' in rest:
                 code, msg = rest.split('|', 1)
                 return code.strip(), msg.strip()
@@ -698,7 +703,7 @@ def _parse_warning_codes(stdout_lines: list[str]) -> list[str]:
     warnings = []
     for line in stdout_lines:
         line = line.strip()
-        if line.startswith('>>> WARN:'):
+        if line.startswith(f'{CLIENT_VISIBLE_LOG_PREFIX} WARN:'):
             if line not in seen:
                 seen.add(line)
                 warnings.append(line)
@@ -745,6 +750,11 @@ def main():
                         '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
                         'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
                         '传 --asr-reselect 启用二次验证。')
+    p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
+                   help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
+                        f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
+                        f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
+                        f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
     p.add_argument('--stop-after-translation', action='store_true',
                    help='翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。'
                         '翻译完成后始终生成 full_translation.srt 字幕文件（无论是否启用此参数）。'
@@ -1094,7 +1104,7 @@ def main():
 
     def _check_stage_marker(line: str):
         """检测服务端 >>> 阶段标记，记录上一阶段耗时。"""
-        if not line.startswith('>>> '):
+        if not line.startswith(f'{CLIENT_VISIBLE_LOG_PREFIX} '):
             return
         content = line[4:].strip()
         if any(kw in content for kw in _STAGE_EXCLUDE_KW):

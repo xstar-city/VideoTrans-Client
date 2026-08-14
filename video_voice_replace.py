@@ -50,6 +50,8 @@ from Common.config import (
     ASR_DIRNAME,
     COMBINED_AUDIO_FILENAME,
     FINAL_AUDIO_FILENAME,
+    FINAL_AUDIO_LUFS,
+    CLIENT_VISIBLE_LOG_PREFIX,
     SEGMENTS_DIRNAME,
     build_segments_dir,
 )
@@ -126,6 +128,9 @@ def _build_remote_args(args, ref_audio_filename: str) -> list[str]:
     # ASR 候选重选（默认关闭，仅在显式开启时透传）
     if getattr(args, 'asr_reselect', False):
         remote_args.append('--asr-reselect')
+
+    # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
+    remote_args.extend(['--final-lufs', str(args.final_lufs)])
 
     return remote_args
 
@@ -308,6 +313,7 @@ def process_voice_replace_pipeline(
     new_task: bool = False,
     edit_rerun: bool = False,
     asr_reselect: bool = False,
+    final_lufs: float = FINAL_AUDIO_LUFS,
 ):
     """视频音色替换主流程：提取音频 -> 上传 -> 远程替换 -> 下载 -> mux。"""
     pipeline_start = time.perf_counter()
@@ -500,6 +506,7 @@ def process_voice_replace_pipeline(
     args.separate = separate
     args.denoise = denoise
     args.asr_reselect = asr_reselect
+    args.final_lufs = final_lufs
 
     remote_args = _build_remote_args(args, ref_filename)
     video_summary = _compute_video_summary([Path(p) for p in args.inputs])
@@ -528,7 +535,7 @@ def process_voice_replace_pipeline(
 
     def _check_stage_marker(line: str):
         """检测服务端 >>> 阶段标记，记录上一阶段耗时。"""
-        if not line.startswith('>>> '):
+        if not line.startswith(f'{CLIENT_VISIBLE_LOG_PREFIX} '):
             return
         content = line[4:].strip()
         if any(kw in content for kw in _STAGE_EXCLUDE_KW):
@@ -703,6 +710,11 @@ def main():
                    help='在所有段 TTS 合成完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
                         '按文本相似度+音色相似度+清晰度重新选优。默认关闭。'
                         '传 --asr-reselect 启用二次验证。')
+    p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
+                   help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
+                        f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
+                        f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
+                        f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
     server_group = p.add_mutually_exclusive_group()
     server_group.add_argument('--server', default='localhost',
                               help='服务端地址（直连模式），支持 IP、域名或完整 URL。默认: localhost')
@@ -761,6 +773,7 @@ def main():
         new_task=args.new_task,
         edit_rerun=args.edit_rerun,
         asr_reselect=args.asr_reselect,
+        final_lufs=args.final_lufs,
     )
 
 
