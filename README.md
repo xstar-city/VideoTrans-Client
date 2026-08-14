@@ -317,7 +317,7 @@ python video_translate_basic.py "1.mp4" -t en --server <ServerIP>
 - 非语言人声/唱歌检测：关闭（单人场景默认不需要）
 - 视觉 diarization：不提供（单人视频无需视觉辅助说话人切分）
 
-其余参数（翻译模式 `tts_aware`、翻译模型列表、降噪级别等）与高级模式一致，也可通过命令行覆盖。支持 `--new-task`（强制重跑）和 `--stop-after-translation`（翻译后暂停检查）。
+其余参数（翻译模式 `tts_aware`、翻译模型列表、降噪级别等）与高级模式一致，也可通过命令行覆盖。支持 `-n` / `--new-task`（强制重跑）和 `--stop-after-translation`（翻译后暂停检查）。
 
 #### 高级模式 `video_translate.py`
 
@@ -333,12 +333,14 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
+| `-t` / `--target` | 目标语言代码（可指定多个，空格分隔），如 `-t en` 或 `-t en hi`。代码见[支持的语种](#3-支持的语种) | `en` |
 | `-s` / `--source` | 源语言代码。中文和英文视频可不指定；**其他语言（日语、韩语、法语等）必须指定**，否则 ASR 按中文识别导致失败。代码见[支持的语种](#3-支持的语种) | `zh` |
 | `--separate` / `--no-separate` | 是否启用人声分离（去背景音）。默认开启；传 `--no-separate` 关闭。 | 启用 |
 | `--detect-nonverbal-and-singing` / `--no-detect-nonverbal-and-singing` | 检测「非语言人声」（笑/咳/喷嚏/掌声/叹息）与「唱歌」段，从 vocals 分流到背景音轨道以保留在最终输出中。这些虽是人声但无需翻译，适用于短剧、电影等场景。默认开启；传 `--no-detect-nonverbal-and-singing` 关闭。 | 启用 |
 | `--denoise` | 降噪级别：`none` / `normal` / `aggressive` | `aggressive` |
+| `--extract-residual-noise` / `--no-extract-residual-noise` | 提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。需要启用人声分离。默认开启；传 `--no-extract-residual-noise` 关闭。 | 启用 |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
-| `--enable-visual-diarization` / `--no-enable-visual-diarization` | 是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭，关闭时本地抽 mp3 上传服务端（带宽友好）；开启时直接上传完整 mp4，由服务端结合人脸跟踪/嘴部运动等视觉信号辅助说话人切分。 | 关闭 |
+| `-v` / `--enable-visual-diarization` / `--no-enable-visual-diarization` | 是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭，关闭时本地抽 mp3 上传服务端（带宽友好）；开启时直接上传完整 mp4，由服务端结合人脸跟踪/嘴部运动等视觉信号辅助说话人切分。 | 关闭 |
 | `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
@@ -347,7 +349,11 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--tts-max-audio-speedup-pct` | TTS 合成音频最大加速百分比（合成长于参考时 librosa 拉伸加快的上限） | 0.2 |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量（1-10，服务端自动限制范围） | 3 |
 | `--asr-reselect` | 翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别所有候选音频，按"文本相似度(50%)+音色相似度(30%)+清晰度(20%)"综合评分重新选优。默认关闭（TTS 内置 ASR 已在试合成时返回清晰度并用于正常选优）；传 `--asr-reselect` 启用二次验证，适用于对选优精度有更高要求的场景。 | 关闭 |
+| `--final-lufs` | 最终音频 `final.mp3` 的整体响度目标，单位 LUFS（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。`-24` 为广播电视标准响度；要更响可调到 `-18`，要更轻可调到 `-30`。 | `-24` |
 | `--stop-after-translation` | 翻译完成后停止流水线，跳过 TTS / 音频合并 / 最终混音。翻译完成后始终生成 `full_translation.srt` 字幕文件（无论是否启用此参数）。核心用途：翻译文本后人工介入检查，核查字幕内容和翻译指南，确认无误后再继续后续流程。 | 关闭 |
+| `-e` / `--edit-rerun` | 编辑重跑模式：检测本地编辑（改 ASR / 改翻译 / 替换合成音频 / 删语种 / 删 mp3 / 删 txt），上传修改的文件并删除服务端对应的下游产物，服务端跳过 ASR 直接从翻译开始，只重跑受影响部分。要求服务端已有该任务的运行记录（详见[客户端编辑重跑模式](#客户端编辑重跑模式)）。 | 关闭 |
+| `-n` / `--new-task` | 强制从零开始：删除本地已翻译视频、`segments` 目录和 `.vt_task_id` 文件，在服务端创建全新任务。用于需要完全重跑的场景。 | 关闭 |
+| `-k` / `--keep-server-files` | 调试用：跑完后不归档、不删除服务端任务目录，方便检查中间产物。 | 关闭 |
 
 #### 翻译模型列表（`--translation-models`）
 
