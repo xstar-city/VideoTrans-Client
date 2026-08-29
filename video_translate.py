@@ -194,7 +194,7 @@ def process_video_pipeline(
             continue
 
         # 编辑重跑模式：不再在此处删除已翻译视频，改为 Step 2 检测到变更后再删除
-        # （避免未检测到变更时白白删除视频）
+        # （避免未检测到变更时白白删除视频；批量模式下仅变更的视频会重新合成）
 
         # 新任务模式：删除所有本地中间结果和输出，强制从头开始
         if new_task:
@@ -437,19 +437,37 @@ def process_video_pipeline(
 
     for code in target_codes:
         _log(f"处理语言: {code}")
-        for video_path, data in list(video_data.items()):
+        # Step 1 因"目标视频已存在"被跳过的视频也参与合成检查：
+        # 其 final.mp3 若在视频合成后被更新（如响度参数调整触发重新归一化），需重新合成
+        all_entries = list(video_data.items()) + [
+            (v, {"upload": v.with_suffix(".mp3")}) for v in skipped_videos
+        ]
+        for video_path, data in all_entries:
             try:
                 out_video = build_translated_output_path(video_path, video_path, code)
-                if out_video.exists():
-                    print(f"目标视频已存在，跳过: {out_video}")
-                    continue
-
                 mp3_path = data["upload"]
                 # segments 目录由 upload 文件的 parent 决定（视频/mp3 同父目录），
                 # 所以 build_segments_dir(upload) 与 build_segments_dir(video_path) 等价。
                 segments_dir = build_segments_dir(mp3_path)
                 lang_dir = segments_dir / get_language_dir_name(code)
                 final_audio = lang_dir / FINAL_AUDIO_FILENAME
+
+                if out_video.exists():
+                    # 音频更新检测：final.mp3 的 mtime 晚于视频合成时间
+                    # （响度参数调整后重新归一化 / 编辑重跑重新混音后同步下载）
+                    # -> 删除旧视频，用最新音频重新合成
+                    # （两个 mtime 均为本地文件系统时钟，无客户端/服务端时间差问题）
+                    if final_audio.exists() and \
+                            final_audio.stat().st_mtime > out_video.stat().st_mtime:
+                        print(f"音频已更新（新于视频合成时间），删除旧视频重新合成: {out_video.name}")
+                        try:
+                            out_video.unlink()
+                        except OSError as e:
+                            print(f"[警告] 无法删除 {out_video.name}: {e}")
+                            continue
+                    else:
+                        print(f"目标视频已存在，跳过: {out_video}")
+                        continue
 
                 if not final_audio.exists():
                     print(f"最终音频未找到 ({video_path.name}, {code})，跳过音轨合并")
@@ -478,7 +496,7 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['gpt-5.6-luna', 'gemini-3.5-flash-lite','deepseek-v4-pro', 'deepseek-v4-flash', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
+DEFAULT_MODELS = ['glm-5.3-flash', 'gemini-3.5-flash-lite', 'gpt-5.6-luna','deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")
