@@ -638,11 +638,14 @@ def _detect_and_apply_edits(
                      f"({delete_ratio:.0%}) ASR 句子被标记为删除！")
                 _log(f"  这可能是因为本地 segments 文件未完整同步，而非用户主动删除。")
                 _log(f"  本地 segments 目录: {local_segments_dir}")
-                print(f"  如确认要删除这些句子，请输入 y 继续，其他输入取消: ", end="", flush=True)
+                print(f"  如确认要删除这些句子，请输入 y 继续，其他输入退出返修: ", end="", flush=True)
                 response = input().strip().lower()
                 if response != 'y':
-                    _log(f"{_vid} 用户取消删除，跳过 {len(deleted_asr_stems)} 个 ASR 句子的删除操作。")
-                    deleted_asr_stems.clear()
+                    # 用户取消说明本地 segments 疑似未完整同步（误判删除），
+                    # 继续返修会产生错误变更，直接终止而非跳过删除继续翻译
+                    _log(f"{_vid} 用户取消删除，终止返修流程。")
+                    _log(f"  疑似本地 segments 未完整同步，请先完整同步本地 segments 后重试。")
+                    sys.exit(1)
                 else:
                     confirmed_asr_stems.update(deleted_asr_stems)
 
@@ -1111,12 +1114,17 @@ def _detect_and_apply_edits(
                 print(f"    {stem}")
             if len(unconfirmed_stems) > 20:
                 print(f"    ... 还有 {len(unconfirmed_stems) - 20} 个句子未显示")
-            print(f"  确认删除请输入 y 继续，其他输入跳过全部删除: ", end="", flush=True)
+            print(f"  确认删除请输入 y 继续，其他输入退出返修: ", end="", flush=True)
             response = input().strip().lower()
             if response != 'y':
-                _log(f"用户取消删除，跳过全部删除操作。")
-                delete_files.clear()
-                delete_dirs.clear()
+                # 用户跳过删除说明本地 segments 疑似未完整同步而非主动编辑，
+                # 继续翻译会基于错误的文件状态产生错误变更，直接终止返修流程
+                _log(f"用户取消删除，终止返修流程。")
+                _log(f"疑似本地 segments 未完整同步，请先完整同步本地 segments 目录后重试。")
+                if upload_list:
+                    _log(f"注意：此前已上传的 {len(upload_list)} 个修改文件将保留在服务端，"
+                         f"下次重跑不会重复上传。")
+                sys.exit(1)
 
     if delete_files or delete_dirs:
         _log(f"删除 {len(delete_files)} 个文件 + {len(delete_dirs)} 个目录...")
