@@ -496,6 +496,10 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
+# 翻译模型 fallback 链：按顺序依次尝试，前一模型请求失败/译文验证不通过时切换下一个。
+# 同一模型名可重复出现（如 qwen3.8-flash 两次）：重复 N 次 = 占 N 个槽位、获得 N 次
+# 独立采样机会——LLM 输出有随机性，重试同一模型也可能给出不同译文。
+# 这是有意设计，列表去重会减少重试机会，请勿"修正"重复项。
 DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gpt-5.6-luna','deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
 
 def main():
@@ -521,7 +525,7 @@ def main():
                         '开启时本地压缩视频到 480p/25fps 后上传，由服务端在 diarization 阶段结合人脸跟踪/嘴部运动等'
                         '视觉信号辅助说话人切分。最终合成视频仍使用本地高清原版。')
 
-    p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔。空值使用默认模型。理论上可接任意模型，未来可拓展。')
+    p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔，按顺序依次尝试。同一模型可重复出现，重复=失败后用该模型再采样一次。空值使用默认模型。理论上可接任意模型，未来可拓展。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,

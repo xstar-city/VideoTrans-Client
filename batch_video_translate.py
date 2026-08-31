@@ -307,7 +307,7 @@ def main():
                         '视觉信号辅助说话人切分。最终合成视频仍使用本地高清原版。')
 
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS),
-                   help='翻译模型列表，以逗号分隔。空值使用默认模型。')
+                   help='翻译模型列表，以逗号分隔，按顺序依次尝试。同一模型可重复出现，重复=失败后用该模型再采样一次。空值使用默认模型。')
     p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware',
                    help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译。默认：tts_aware')
     p.add_argument('--extra-translation-guideline',

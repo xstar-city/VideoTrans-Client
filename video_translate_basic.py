@@ -60,7 +60,7 @@ def main():
                         f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
                         f'控制视频合成后的最终音量：服务端在最终混音后把整条音频归一化到此响度。'
                         f'默认 {FINAL_AUDIO_LUFS}（广播电视标准响度）；要更响可调到 -18，要更轻可调到 -30。')
-    p.add_argument("--translation-models", default=",".join(DEFAULT_MODELS), help="翻译模型列表，以逗号分隔。默认使用与完整版相同的模型列表。")
+    p.add_argument("--translation-models", default=",".join(DEFAULT_MODELS), help="翻译模型列表，以逗号分隔，按顺序依次尝试。同一模型可重复出现，重复=失败后用该模型再采样一次。默认使用与完整版相同的模型列表。")
     p.add_argument("--extra-translation-guideline", default=None, help="额外翻译指南文本文件路径")
     # ── 工作流参数 ──
     p.add_argument('--stop-after-translation', action='store_true',

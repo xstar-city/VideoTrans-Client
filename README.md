@@ -361,12 +361,13 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 
 ```python
 # 对外客户端/video_translate.py
-DEFAULT_MODELS = ['gpt-5.6-luna', 'gemini-3.5-flash-lite', 'deepseek-v4-pro', 'deepseek-v4-flash', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
+# qwen3.8-flash 出现两次是有意设计：占两个 fallback 槽位，获得两次独立采样机会
+DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gpt-5.6-luna', 'deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
 ```
 
 翻译时会**按顺序依次尝试**列表中的模型，因此：
 
-- **模型可以重复**：例如列表中可以让同一模型出现多次，表示首次失败后自动重试一次。
+- **模型可以重复**：同一模型出现多次表示它占用多个槽位——首次失败（服务出错或译文验证不通过）后，用**同一个模型再采样一次**（LLM 输出具有随机性，重试可能给出不同译文）。例如上例中 `qwen3.8-flash` 写了两次，即首个槽位失败后还有一次同模型重试机会。这是有意设计，不是笔误，请勿去重。
 - **顺序兜底保证鲁棒性**：如果某个模型服务出错或不可访问，会自动跳到列表中的下一个模型继续翻译，不会因为单个模型故障导致整个流程中断。
 - **自定义方式**：既可以在命令行通过 `--translation-models modelA,modelB` 临时指定，也可以直接修改 `DEFAULT_MODELS` 变量调整默认值。
 
