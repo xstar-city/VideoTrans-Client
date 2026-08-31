@@ -496,7 +496,7 @@ def process_video_pipeline(
 # ============================================================
 
 # video pipeline
-DEFAULT_MODELS = ['glm-5.3-flash', 'gemini-3.5-flash-lite', 'gpt-5.6-luna','deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
+DEFAULT_MODELS = ['gemini-3.5-flash-lite', 'gpt-5.6-luna','deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")
