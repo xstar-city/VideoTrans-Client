@@ -121,7 +121,6 @@ def main():
             denoise=args.denoise,
             asr_mode="basic",               # 基本模式使用 ASR 自带说话人切分
             translation_models=args.translation_models,
-            translation_mode="tts_aware",   # TTS 时长感知翻译
             extra_translation_guideline=args.extra_translation_guideline,
             # ── 工作流参数 ──
             stop_after_translation=args.stop_after_translation,

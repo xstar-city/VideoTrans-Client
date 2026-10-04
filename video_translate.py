@@ -34,8 +34,7 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.config import (
     FINAL_AUDIO_FILENAME,
     FINAL_AUDIO_LUFS,
-    TTS_MAX_AUDIO_SLOWDOWN_PCT,
-    TTS_MAX_AUDIO_SPEEDUP_PCT,
+    TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
     build_segments_dir,
@@ -130,10 +129,8 @@ def process_video_pipeline(
     denoise: str = "aggressive",
     asr_mode: str = "precise",
     translation_models: str = "",
-    translation_mode: str = "tts_aware",
     tts_aware_max_retries: int = TTS_AWARE_MAX_DURATION_RETRIES,
-    tts_max_audio_slowdown_pct: float = TTS_MAX_AUDIO_SLOWDOWN_PCT,
-    tts_max_audio_speedup_pct: float = TTS_MAX_AUDIO_SPEEDUP_PCT,
+    tts_speech_rate_preference: float = TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
     tts_aware_min_candidate_count: int = TTS_AWARE_MIN_CANDIDATE_COUNT,
     extra_translation_guideline: str | None = None,
     enable_visual_diarization: bool = False,
@@ -304,10 +301,8 @@ def process_video_pipeline(
         audio_argv.extend(["--asr-mode", asr_mode])
         if translation_models:
             audio_argv.extend(["--translation-models", translation_models])
-        audio_argv.extend(["--translation-mode", translation_mode])
         audio_argv.extend(["--tts-aware-max-retries", str(tts_aware_max_retries)])
-        audio_argv.extend(["--tts-max-audio-slowdown-pct", str(tts_max_audio_slowdown_pct)])
-        audio_argv.extend(["--tts-max-audio-speedup-pct", str(tts_max_audio_speedup_pct)])
+        audio_argv.extend(["--tts-speech-rate-preference", str(tts_speech_rate_preference)])
         audio_argv.extend(["--tts-aware-min-candidate-count", str(tts_aware_min_candidate_count)])
         # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
         audio_argv.extend(["--final-lufs", str(final_lufs)])
@@ -500,7 +495,18 @@ def process_video_pipeline(
 # 同一模型名可重复出现（如 qwen3.8-flash 两次）：重复 N 次 = 占 N 个槽位、获得 N 次
 # 独立采样机会——LLM 输出有随机性，重试同一模型也可能给出不同译文。
 # 这是有意设计，列表去重会减少重试机会，请勿"修正"重复项。
-DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gpt-5.6-luna','deepseek-v4-pro', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra', 'gemini-3.6-flash']
+DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gpt-5.6-luna','deepseek-v4.1-flash', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra']
+
+# TTS 语速偏好 CLI 校验（argparse type）：合法区间 [0.5, 2.0]
+def _speech_rate_preference_arg(value: str) -> float:
+    try:
+        pref = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"语速偏好必须是数字，收到: {value!r}")
+    if not 0.5 <= pref <= 2.0:
+        raise argparse.ArgumentTypeError(
+            f"语速偏好必须在 [0.5, 2.0] 区间内（1.0=等速，<1 偏慢，>1 偏快），收到: {pref}")
+    return pref
 
 def main():
     p = argparse.ArgumentParser(description="视频翻译：提取音频 -> 远程翻译 -> 本地视频同步")
@@ -526,14 +532,13 @@ def main():
                         '视觉信号辅助说话人切分。最终合成视频仍使用本地高清原版。')
 
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS), help='翻译模型列表，以逗号分隔，按顺序依次尝试。同一模型可重复出现，重复=失败后用该模型再采样一次。空值使用默认模型。理论上可接任意模型，未来可拓展。')
-    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
                    help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
-    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=TTS_MAX_AUDIO_SLOWDOWN_PCT,
-                   help=f'TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SLOWDOWN_PCT}')
-    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=TTS_MAX_AUDIO_SPEEDUP_PCT,
-                   help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
+    p.add_argument('--tts-speech-rate-preference', type=_speech_rate_preference_arg,
+                   default=TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
+                   help=f'TTS 语速偏好：1.0=与原声等速，<1 偏慢、>1 偏快，'
+                        f'合法区间 [0.5, 2.0]（默认: {TTS_SPEECH_RATE_PREFERENCE_DEFAULT}）')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
                    
@@ -620,10 +625,8 @@ def main():
             denoise=args.denoise,
             asr_mode=args.asr_mode,
             translation_models=args.translation_models,
-            translation_mode=args.translation_mode,
             tts_aware_max_retries=args.tts_aware_max_retries,
-            tts_max_audio_slowdown_pct=args.tts_max_audio_slowdown_pct,
-            tts_max_audio_speedup_pct=args.tts_max_audio_speedup_pct,
+            tts_speech_rate_preference=args.tts_speech_rate_preference,
             tts_aware_min_candidate_count=args.tts_aware_min_candidate_count,
             extra_translation_guideline=args.extra_translation_guideline,
             enable_visual_diarization=args.enable_visual_diarization,

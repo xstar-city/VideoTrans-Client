@@ -34,8 +34,7 @@ from pathlib import Path
 from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from Common.config import (
-    TTS_MAX_AUDIO_SLOWDOWN_PCT,
-    TTS_MAX_AUDIO_SPEEDUP_PCT,
+    TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
     FINAL_AUDIO_LUFS,
@@ -412,15 +411,11 @@ def _build_remote_args(args) -> list[str]:
     if args.translation_models:
         remote_args.extend(['--translation-models', args.translation_models])
 
-    # 翻译模式
-    remote_args.extend(['--translation-mode', args.translation_mode])
-
     # TTS 感知重试次数
     remote_args.extend(['--tts-aware-max-retries', str(args.tts_aware_max_retries)])
 
-    # TTS 音频拉伸百分比限制
-    remote_args.extend(['--tts-max-audio-slowdown-pct', str(args.tts_max_audio_slowdown_pct)])
-    remote_args.extend(['--tts-max-audio-speedup-pct', str(args.tts_max_audio_speedup_pct)])
+    # TTS 语速偏好（ρ_listen 判定窗中心）
+    remote_args.extend(['--tts-speech-rate-preference', str(args.tts_speech_rate_preference)])
 
     # TTS 时长感知翻译：最小合格候选数量（服务端会限制 1~10）
     remote_args.extend(['--tts-aware-min-candidate-count', str(args.tts_aware_min_candidate_count)])
@@ -715,6 +710,18 @@ edit_rerun_had_changes: set[str] = set()
 
 # ─── 主流程 ────────────────────────────────────────────────
 
+# TTS 语速偏好 CLI 校验（argparse type）：合法区间 [0.5, 2.0]
+# （本脚本是独立入口不 import video_translate，与彼处同款小函数各自持有）
+def _speech_rate_preference_arg(value: str) -> float:
+    try:
+        pref = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"语速偏好必须是数字，收到: {value!r}")
+    if not 0.5 <= pref <= 2.0:
+        raise argparse.ArgumentTypeError(
+            f"语速偏好必须在 [0.5, 2.0] 区间内（1.0=等速，<1 偏慢，>1 偏快），收到: {pref}")
+    return pref
+
 def main():
     p = argparse.ArgumentParser(description='音频翻译客户端：上传音频到服务端远程执行翻译，增量下载结果。')
     p.add_argument('inputs', nargs='+', help='本地音频文件路径列表 (mp3)。')
@@ -735,14 +742,13 @@ def main():
     p.add_argument('--enable-visual-diarization', dest='enable_visual_diarization', action='store_true', default=False, help=argparse.SUPPRESS)
     
     p.add_argument('--translation-models', default='', help='用于翻译的逗号分隔模型列表。空值使用服务端默认值。')
-    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware', help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译（翻译+TTS试合成+时长评估+LLM反馈调整）。默认：tts_aware')
     p.add_argument('--extra-translation-guideline', help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
                    help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
-    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=TTS_MAX_AUDIO_SLOWDOWN_PCT,
-                   help=f'TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SLOWDOWN_PCT}')
-    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=TTS_MAX_AUDIO_SPEEDUP_PCT,
-                   help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
+    p.add_argument('--tts-speech-rate-preference', type=_speech_rate_preference_arg,
+                   default=TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
+                   help=f'TTS 语速偏好：1.0=与原声等速，<1 偏慢、>1 偏快，'
+                        f'合法区间 [0.5, 2.0]（默认: {TTS_SPEECH_RATE_PREFERENCE_DEFAULT}）')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
     p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,

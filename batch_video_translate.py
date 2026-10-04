@@ -42,8 +42,7 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.config import (
     VIDEO_CONTAINER_SUFFIXES,
     PIPELINE_DERIVED_STEM_MARKERS,
-    TTS_MAX_AUDIO_SLOWDOWN_PCT,
-    TTS_MAX_AUDIO_SPEEDUP_PCT,
+    TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
     FINAL_AUDIO_LUFS,
@@ -51,7 +50,7 @@ from Common.config import (
 from Common.language_map import normalize_target_language_codes
 from Common.tts_languages import ALL_TTS_LANGUAGE_CODES
 from Common.video_utils import get_video_duration
-from video_translate import DEFAULT_MODELS
+from video_translate import DEFAULT_MODELS, _speech_rate_preference_arg
 from remote_client import resolve_server_arg
 
 
@@ -308,16 +307,14 @@ def main():
 
     p.add_argument('--translation-models', default=",".join(DEFAULT_MODELS),
                    help='翻译模型列表，以逗号分隔，按顺序依次尝试。同一模型可重复出现，重复=失败后用该模型再采样一次。空值使用默认模型。')
-    p.add_argument('--translation-mode', choices=['independent', 'tts_aware'], default='tts_aware',
-                   help='翻译模式: independent=纯文本独立翻译, tts_aware=TTS时长感知翻译。默认：tts_aware')
     p.add_argument('--extra-translation-guideline',
                    help='包含额外翻译指南（e.g.定制化场景要求）的文本文件路径（可选参数）')
     p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
                    help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
-    p.add_argument('--tts-max-audio-slowdown-pct', type=float, default=TTS_MAX_AUDIO_SLOWDOWN_PCT,
-                   help=f'TTS 合成音频最大减速百分比（合成短于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SLOWDOWN_PCT}')
-    p.add_argument('--tts-max-audio-speedup-pct', type=float, default=TTS_MAX_AUDIO_SPEEDUP_PCT,
-                   help=f'TTS 合成音频最大加速百分比（合成长于参考时拉伸上限）。默认: {TTS_MAX_AUDIO_SPEEDUP_PCT}')
+    p.add_argument('--tts-speech-rate-preference', type=_speech_rate_preference_arg,
+                   default=TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
+                   help=f'TTS 语速偏好：1.0=与原声等速，<1 偏慢、>1 偏快，'
+                        f'合法区间 [0.5, 2.0]（默认: {TTS_SPEECH_RATE_PREFERENCE_DEFAULT}）')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
     p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
@@ -425,10 +422,8 @@ def main():
             extract_residual_noise=args.extract_residual_noise,
             asr_mode=args.asr_mode,
             translation_models=args.translation_models,
-            translation_mode=args.translation_mode,
             tts_aware_max_retries=args.tts_aware_max_retries,
-            tts_max_audio_slowdown_pct=args.tts_max_audio_slowdown_pct,
-            tts_max_audio_speedup_pct=args.tts_max_audio_speedup_pct,
+            tts_speech_rate_preference=args.tts_speech_rate_preference,
             tts_aware_min_candidate_count=args.tts_aware_min_candidate_count,
             extra_translation_guideline=args.extra_translation_guideline,
             enable_visual_diarization=args.enable_visual_diarization,

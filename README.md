@@ -341,7 +341,6 @@ python video_translate.py "1.mp4" -t en --server <ServerIP>
 | `--extract-residual-noise` / `--no-extract-residual-noise` | 提取 ASR 未识别区间的背景噪音片段（写字、摩擦、开门等），在最终混音时叠加到背景音轨道。需要启用人声分离。默认开启；传 `--no-extract-residual-noise` 关闭。 | 启用 |
 | `--asr-mode` | ASR 模式：`basic` / `precise`。`precise` 会执行二次说话人切分，生成校准日志（详见[二次说话人切分校准日志说明](二次说话人切分校准日志说明.md)） | `precise` |
 | `-v` / `--enable-visual-diarization` / `--no-enable-visual-diarization` | 是否启用视觉辅助说话人切分（视觉 diarization）。默认关闭，关闭时本地抽 mp3 上传服务端（带宽友好）；开启时直接上传完整 mp4，由服务端结合人脸跟踪/嘴部运动等视觉信号辅助说话人切分。 | 关闭 |
-| `--translation-mode` | 翻译模式：`independent` / `tts_aware`（详见下方说明） | `tts_aware` |
 | `--translation-models` | 翻译模型（逗号分隔）。各模型翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md) | 自动选择 |
 | `--extra-translation-guideline` | 额外翻译指南文件路径 | 无 |
 | `--tts-aware-max-retries` | TTS 感知翻译自适应重试次数 | 10 |
@@ -373,22 +372,17 @@ DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gp
 
 各模型的翻译质量对比见 [大语言模型翻译测评报告](resourses/2026年最新大语言模型翻译测评报告：中文_英语到印地语.md)。
 
-#### 翻译模式与时长匹配（`--translation-mode`）
+#### TTS 时长感知翻译与时长匹配
 
 不同语言语速差异大，翻译后语音时长往往与原文不一致。为了保证视频画面不被拉伸、背景音轨不漂移，本系统要求**每段 TTS 合成音频的时长严格等于原段时长**，时长贴合的责任全部收敛到 TTS 段自身，依次有三层兜底：
 
 | 层 | 手段 | 何时触发 |
 |---|------|---------|
-| 第 1 层 | LLM 调整翻译措辞 | 仅 `tts_aware` 模式：试合成 → 测时长 → 超范围则让 LLM 改写措辞重译，默认重试 10 次 |
+| 第 1 层 | LLM 调整翻译措辞 | 试合成 → 测时长 → 超范围则让 LLM 改写措辞重译，默认重试 10 次（`--tts-aware-max-retries`） |
 | 第 2 层 | 模型重合成（仅支持 `duration` 参数的 TTS） | 第 1 层无法消化时，用带 duration 参数喂回模型直接生成等长音频 |
-| 第 3 层 | librosa 信号级时长拉伸 | 兜底：严格把音频拉到目标时长，所有 TTS 通用 |
+| 第 3 层 | 信号级时长拉伸 + 声学编辑 | 兜底：翻译与合成全部完成后，统一对每个候选做时长对齐（优先声学编辑保持听感，失败则严格拉伸到目标时长） |
 
-第 3 层永远兜底执行，**落盘时强制等长**，不留误差。
-
-`--translation-mode` 控制是否启用第 1 层：
-
-- **`independent`**（独立翻译）：只做文本翻译，不调整措辞控制时长。翻译速度快，所有时长差异完全由第 3 层 librosa 拉伸消化，长差异大的句子语速变化会比较明显。
-- **`tts_aware`**（TTS 时长感知翻译，默认）：试合成 + 时长反馈循环，大部分差异在第 1 层就被消化，语音自然度更高。`--tts-aware-max-retries` 控制每段的 LLM 重译次数（默认 10）。
+第 3 层在翻译/合成完成后的统一后处理阶段执行，**落盘即严格等长**，不留误差。
 
 > 💡 视频画面和背景音轨不再做任何拉伸，因此音频段必须严格等长，没有"允许误差"的概念。如对 LLM 重译次数有特殊要求可调 `--tts-aware-max-retries`。
 
@@ -400,7 +394,7 @@ DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gp
 | `--tts-max-audio-speedup-pct` | 合成音频**长于**参考音频时，第 3 层兜底拉伸最多加快此比例；同时决定**成品语速承诺上限**（译文发音密度最高为原声的 1+此值） | 0.1（即最多加快 10%） |
 | `--tts-aware-min-candidate-count` | 每个片段至少保留的合格候选音频数量。值越大候选越多、选优质量越高，但 TTS 合成次数也越多、耗时越长。服务端自动限制在 1-10 范围 | 3 |
 
-> 💡 这三个参数仅 `tts_aware` 模式下生效。`independent` 模式下时长差异完全由第 3 层 librosa 拉伸消化，前两个参数控制拉伸上限。
+> 💡 前两个参数决定第 3 层兜底拉伸的上限，同时约束成品的语速承诺范围（发音密度上下限）。
 
 ### 音频翻译 `audio_translate.py`
 
