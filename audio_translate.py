@@ -423,9 +423,9 @@ def _build_remote_args(args) -> list[str]:
     # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
     remote_args.extend(['--final-lufs', str(args.final_lufs)])
 
-    # ASR 候选重选（默认关闭，仅在显式开启时透传）
-    if getattr(args, 'asr_reselect', False):
-        remote_args.append('--asr-reselect')
+    # ASR 候选重选（默认开启，仅在显式关闭时透传否定形式）
+    if getattr(args, 'asr_reselect', True) is False:
+        remote_args.append('--no-asr-reselect')
 
     # 视觉辅助说话人切分（默认关闭，仅在显式开启时透传）
     if getattr(args, 'enable_visual_diarization', False):
@@ -751,11 +751,10 @@ def main():
                         f'合法区间 [0.5, 2.0]（默认: {TTS_SPEECH_RATE_PREFERENCE_DEFAULT}）')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
-    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=True,
                    help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
-                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
-                        'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
-                        '传 --asr-reselect 启用二次验证。')
+                        '回听读全的候选优先（拦截 TTS 丢读漏字），按文本+音色+清晰度重新选优。'
+                        '默认开启；传 --no-asr-reselect 关闭。')
     p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
                    help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
                         f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'

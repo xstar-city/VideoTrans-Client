@@ -139,7 +139,7 @@ def process_video_pipeline(
     new_task: bool = False,
     keep_server_files: bool = False,
     task_id_dir: Path | None = None,
-    asr_reselect: bool = False,
+    asr_reselect: bool = True,
     final_lufs: float = FINAL_AUDIO_LUFS,
 ):
     """视频翻译主流程：提取音频 -> 远程翻译 -> 本地原视频画面 + 新音轨 mux。
@@ -327,8 +327,9 @@ def process_video_pipeline(
         if stop_after_translation:
             audio_argv.append("--stop-after-translation")
 
-        if asr_reselect:
-            audio_argv.append("--asr-reselect")
+        # ASR 候选重选默认开启，仅在显式关闭时追加否定形式
+        if asr_reselect is False:
+            audio_argv.append("--no-asr-reselect")
 
         if new_task:
             audio_argv.append("--new-task")
@@ -495,7 +496,7 @@ def process_video_pipeline(
 # 同一模型名可重复出现（如 qwen3.8-flash 两次）：重复 N 次 = 占 N 个槽位、获得 N 次
 # 独立采样机会——LLM 输出有随机性，重试同一模型也可能给出不同译文。
 # 这是有意设计，列表去重会减少重试机会，请勿"修正"重复项。
-DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gpt-5.6-luna','deepseek-v4.1-flash', 'doubao-seed-2-1-turbo', 'qwen3.8-max', 'gpt-5.6-terra']
+DEFAULT_MODELS = ['qwen3.8-flash', 'qwen3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gpt-6-luna', 'doubao-seed-2-1-turbo', 'qwen3.8-max']
 
 # TTS 语速偏好 CLI 校验（argparse type）：合法区间 [0.5, 2.0]
 def _speech_rate_preference_arg(value: str) -> float:
@@ -542,11 +543,10 @@ def main():
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
                    help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
                    
-    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=True,
                    help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
-                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭；'
-                        'TTS 内置 asr_clarity 已在试合成时返回并用于正常选优。'
-                        '传 --asr-reselect 启用二次验证。')
+                        '回听读全的候选优先（拦截 TTS 丢读漏字），按文本+音色+清晰度重新选优。'
+                        '默认开启；传 --no-asr-reselect 关闭。')
     p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
                    help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
                         f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'

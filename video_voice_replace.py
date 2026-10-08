@@ -125,9 +125,9 @@ def _build_remote_args(args, ref_audio_filename: str) -> list[str]:
     # 降噪
     remote_args.extend(['--denoise', args.denoise])
 
-    # ASR 候选重选（默认关闭，仅在显式开启时透传）
-    if getattr(args, 'asr_reselect', False):
-        remote_args.append('--asr-reselect')
+    # ASR 候选重选（默认开启，仅在显式关闭时透传否定形式）
+    if getattr(args, 'asr_reselect', True) is False:
+        remote_args.append('--no-asr-reselect')
 
     # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
     remote_args.extend(['--final-lufs', str(args.final_lufs)])
@@ -312,7 +312,7 @@ def process_voice_replace_pipeline(
     denoise: str = "aggressive",
     new_task: bool = False,
     edit_rerun: bool = False,
-    asr_reselect: bool = False,
+    asr_reselect: bool = True,
     final_lufs: float = FINAL_AUDIO_LUFS,
 ):
     """视频音色替换主流程：提取音频 -> 上传 -> 远程替换 -> 下载 -> mux。"""
@@ -706,10 +706,10 @@ def main():
                         '开启后 TTS 合成人声会与背景音混音输出 final.mp3；关闭时直接使用 combined.mp3。')
     p.add_argument('--denoise', choices=['none', 'normal', 'aggressive'], default='aggressive',
                    help='降噪类型（需要人声分离）。默认：aggressive')
-    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=False,
+    p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=True,
                    help='在所有段 TTS 合成完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
-                        '按文本相似度+音色相似度+清晰度重新选优。默认关闭。'
-                        '传 --asr-reselect 启用二次验证。')
+                        '回听读全的候选优先（拦截 TTS 丢读漏字），按文本+音色+清晰度重新选优。'
+                        '默认开启；传 --no-asr-reselect 关闭。')
     p.add_argument('--final-lufs', type=float, default=FINAL_AUDIO_LUFS,
                    help=f'最终音频 final.mp3 的整体响度目标，单位 LUFS'
                         f'（EBU R128 / ATSC A/85 广播电视响度标准，数值越接近 0 越响）。'
