@@ -42,7 +42,6 @@ from Common.asr_languages import ALL_ASR_LANGUAGE_CODES
 from Common.config import (
     VIDEO_CONTAINER_SUFFIXES,
     PIPELINE_DERIVED_STEM_MARKERS,
-    TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
     TTS_AWARE_MIN_CANDIDATE_COUNT,
     TTS_AWARE_MAX_DURATION_RETRIES,
     FINAL_AUDIO_LUFS,
@@ -312,11 +311,12 @@ def main():
     p.add_argument('--tts-aware-max-retries', type=int, default=TTS_AWARE_MAX_DURATION_RETRIES,
                    help=f'TTS感知翻译中每句的自适应翻译重试次数（默认: {TTS_AWARE_MAX_DURATION_RETRIES}）')
     p.add_argument('--tts-speech-rate-preference', type=_speech_rate_preference_arg,
-                   default=TTS_SPEECH_RATE_PREFERENCE_DEFAULT,
-                   help=f'TTS 语速偏好：1.0=与原声等速，<1 偏慢、>1 偏快，'
-                        f'合法区间 [0.5, 2.0]（默认: {TTS_SPEECH_RATE_PREFERENCE_DEFAULT}）')
+                   default=None,
+                   help='TTS 语速偏好：auto=自动（默认，按语言对语速特性自动定值，'
+                        '目标语言更啰嗦自动放慢、更简洁自动加快，调整幅度 ±20% 以内）；'
+                        '填数字则严格执行：1.0=与原声等速，<1 偏慢、>1 偏快，合法区间 [0.5, 2.0]')
     p.add_argument('--tts-aware-min-candidate-count', type=int, default=TTS_AWARE_MIN_CANDIDATE_COUNT,
-                   help=f'每个片段至少保留的合格候选音频数量（1-10）。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
+                   help=f'收集阶段凑满目标：哑火/质量筛选后的存活候选条数（1-10），越大阶段 3 ASR 选优范围越广。默认: {TTS_AWARE_MIN_CANDIDATE_COUNT}')
     p.add_argument('--asr-reselect', action=argparse.BooleanOptionalAction, default=True,
                    help='在所有段翻译完成后执行 ASR 候选重选：用更大 ASR 模型批量识别候选音频，'
                         '回听读全的候选优先（拦截 TTS 丢读漏字），按文本+音色+清晰度重新选优。'

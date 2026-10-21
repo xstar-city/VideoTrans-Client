@@ -125,9 +125,11 @@ def _build_remote_args(args, ref_audio_filename: str) -> list[str]:
     # 降噪
     remote_args.extend(['--denoise', args.denoise])
 
-    # ASR 候选重选（默认开启，仅在显式关闭时透传否定形式）
-    if getattr(args, 'asr_reselect', True) is False:
-        remote_args.append('--no-asr-reselect')
+    # ASR 候选重选：客户端默认开启，必须显式双形式透传——服务端
+    # argparse 默认 False，不传参数等于关闭
+    remote_args.append(
+        '--asr-reselect' if getattr(args, 'asr_reselect', True) else '--no-asr-reselect'
+    )
 
     # 最终音频整体响度（服务端在最终混音后对 final.mp3 做整体标准化）
     remote_args.extend(['--final-lufs', str(args.final_lufs)])
