@@ -435,9 +435,11 @@ def _build_remote_args(args) -> list[str]:
     if getattr(args, 'enable_visual_diarization', False):
         remote_args.append('--enable-visual-diarization')
 
-    # 编辑重跑模式：透传 --skip-asr 让服务端跳过 ASR 流程
+    # 编辑重跑模式：透传 --skip-asr（跳过 ASR）+ --edit-rerun（编辑重跑门控，
+    # 服务端据此才允许复用定稿 txt 自动重合成）——两参数语义分离，均显式传递
     if getattr(args, 'edit_rerun', False):
         remote_args.append('--skip-asr')
+        remote_args.append('--edit-rerun')
 
     # 仅翻译模式：透传 --stop-after-translation 让服务端跳过 TTS / 合并 / 混音
     if getattr(args, 'stop_after_translation', False):
